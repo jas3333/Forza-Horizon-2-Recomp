@@ -2,11 +2,6 @@
 /out/
 /build/
 
-# Codegen output -- regenerated from the manifest + the retail XEX via
-# `cmake --build . --target forzahorizon2_codegen`. Not committed: derived
-# from a copyrighted game binary that is never itself part of this repo,
-# and at ~500MB it isn't practical to version anyway.
-/generated/
 
 # Session/runtime state written by the SDK at run time (logs, caches, user
 # profile data) -- never source, always local to a machine/run.
