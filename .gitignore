@@ -29,3 +29,4 @@
 *.xbe
 *.iso
 *.xiso
+/generated/
