@@ -46,16 +46,26 @@ SpeechFacade_default.xex
 git clone https://github.com/fabioap-cpu/Forza-Horizon-2-Recomp.git
 cd Forza-Horizon-2-Recomp
 
-# Point the codegen/runtime at your own extracted game copy.
-# Edit config_default.toml: set game_data_root to that path.
-
+cmake --preset win-amd64-release
 cmake --build --preset win-amd64-release --target forzahorizon2_codegen
 cmake --build --preset win-amd64-release --target forzahorizon2
 ```
 
-The first command runs the ReXGlue codegen (recompiles the guest XEX into C++ under `generated/`, not committed -- it's regenerated locally and can be large). The second builds the actual `forzahorizon2.exe`.
+The first `cmake --build` runs the ReXGlue codegen (recompiles the guest XEX into C++ under `generated/`, not committed -- it's regenerated locally and can be large). The second builds the actual `forzahorizon2.exe`, written to `out/build/win-amd64-release/`.
+
+## Run, pointing at your extracted game
+
+The executable takes the game folder as a runtime option, not a build-time setting -- you don't need to rebuild to point it at a different copy. From `out/build/win-amd64-release/`:
+
+```powershell
+.\forzahorizon2.exe --game_data_root="D:\path\to\your\extracted\Forza Horizon 2"
+```
+
+That folder must directly contain `default.xex`, `XMediaFacade_default.xex`, and `SpeechFacade_default.xex` (see **Requirements** above). The value gets written back into an auto-generated `forzahorizon2.toml` next to the exe, so subsequent launches without the flag reuse the same path.
 
 Given the current known stall, launching the result will boot into a loading screen and stop there -- see **Project status** above.
+
+`tools/launch-fh2.ps1` and `tools/setup-fh2.ps1` are convenience scripts from local development; check what they actually do before relying on them; `--game_data_root` above is the one path that's been directly verified against the SDK's own option-parsing code.
 
 ## Repository policy
 
