@@ -3,21 +3,21 @@
 [project]
 name = "forzahorizon2"
 sdk_version = "0.10.0"
-game_root = "../Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)"
+game_root = "../game"
 
 [entrypoint]
-file_path = "../Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)/default.xex"
+file_path = "../game/default.xex"
 out_directory_path = "generated/default"
 includes = ["config_default.toml", "vtables.toml"]
 
 [[modules]]
 guest_path = "XMediaFacade_default.xex"
-file_path = "../Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)/XMediaFacade_default.xex"
+file_path = "../game/XMediaFacade_default.xex"
 out_directory_path = "generated/xmediafacade_default"
 includes = ["config_xmedia.toml"]
 
 [[modules]]
 guest_path = "SpeechFacade_default.xex"
-file_path = "../Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)/SpeechFacade_default.xex"
+file_path = "../game/SpeechFacade_default.xex"
 out_directory_path = "generated/speechfacade_default"
 includes = ["config_speech.toml"]

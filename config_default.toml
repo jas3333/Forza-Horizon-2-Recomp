@@ -30,8 +30,11 @@ size = 0x08
 [functions."8305E91C"]
 size = 0x08
 
-[functions."82C53234"]
-size = 0x08
+# 82C53234 was pinned here as an 8-byte function, but it is the loop-back
+# tail of sub_82C53170 (KeSetEvent; b 82C53234 -> mr r31,r18; b 82C531D8)
+# and branches into the middle of its parent. As a standalone function that
+# branch cannot be resolved and codegen emits REX_FATAL, so leave it to the
+# parent function instead.
 
 # Third pass, 2026-09-01: 3 of the original 8 broken entries were wrongly
 # left out earlier because removing them produced no static Validate error

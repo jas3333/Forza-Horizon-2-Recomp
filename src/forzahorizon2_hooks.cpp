@@ -1,4 +1,9 @@
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include <rex/exception_handler.h>
+#endif
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
@@ -73,6 +78,7 @@ static std::atomic<uint32_t> g_xmedia_call_count{0};
 //
 // This is still a workaround, not a fix: pages the title expects to be
 // committed are not, and something upstream should be committing them.
+#ifdef _WIN32
 LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
   if (ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
     uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
@@ -96,6 +102,25 @@ struct CrashHandlerInit {
     AddVectoredExceptionHandler(1, CrashFilter);
   }
 } g_crashHandlerInit;
+#else
+// POSIX port of CrashFilter. Guest pages are reserved PROT_NONE in the SDK's
+// shared-memory arena, so "committing" one is an mprotect. This goes through
+// the SDK's exception chain rather than a raw sigaction so its own SIGSEGV
+// users (MMIO, GPU write watches) see faults first; it is installed from
+// OnPreLaunchModule(), after the runtime has registered those.
+bool CrashFilter(rex::arch::Exception* ex, void* data) {
+  (void)data;
+  if (ex->code() != rex::arch::Exception::Code::kAccessViolation) {
+    return false;
+  }
+  uint64_t fault_addr = ex->fault_address();
+  if (fault_addr < 0x0000000100000000ull || fault_addr >= 0x0000000600000000ull) {
+    return false;
+  }
+  uintptr_t page_base = fault_addr & ~0xFFFFull;
+  return mprotect(reinterpret_cast<void*>(page_base), 0x10000, PROT_READ | PROT_WRITE) == 0;
+}
+#endif
 
 static uint32_t GetXMediaExport(uint32_t ordinal) {
   switch (ordinal) {
@@ -138,6 +163,13 @@ static uint32_t GetSpeechExport(uint32_t ordinal) {
 }
 
 }  // namespace
+
+void InstallGuestPageFaultRecovery() {
+#ifndef _WIN32
+  static std::once_flag once;
+  std::call_once(once, [] { rex::arch::ExceptionHandler::Install(CrashFilter, nullptr); });
+#endif
+}
 
 extern "C" void __imp__XamGetLiveHiveValueA(PPCContext& ctx, uint8_t* base) {
   (void)base;

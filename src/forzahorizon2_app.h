@@ -15,6 +15,9 @@
 
 #include "forzahorizon2_init.h"
 
+// Defined in forzahorizon2_hooks.cpp.
+void InstallGuestPageFaultRecovery();
+
 // Xbox Live Hive / Cloud sync offline handler
 static void Hook_sub_82D9F3E0(PPCContext& ctx, uint8_t* base) {
   (void)base;
@@ -85,9 +88,17 @@ class Forzahorizon2App : public rex::ReXApp {
     // exact same root ContentManager resolves against.
     user_data_root_ = paths.user_data_root;
     
-    // Absolute path for game data root
-    std::filesystem::path game_dir = "D:\\GAME RECOMP\\Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)";
-    paths.game_data_root = std::filesystem::weakly_canonical(game_dir);
+    // --game_data_root wins; the original development path is only a fallback
+    // on Windows. Elsewhere the SDK reports the missing flag itself.
+    if (paths.game_data_root.empty()) {
+#ifdef _WIN32
+      paths.game_data_root =
+          "D:\\GAME RECOMP\\Forza Horizon 2 (Europe) (En,Ja,Fr,De,Es,It,Pt,Zh,Pl,Ru)";
+#endif
+    }
+    if (!paths.game_data_root.empty()) {
+      paths.game_data_root = std::filesystem::weakly_canonical(paths.game_data_root, ec);
+    }
     paths.update_data_root = paths.game_data_root;
 
     std::filesystem::create_directories(paths.user_data_root, ec);
@@ -96,6 +107,8 @@ class Forzahorizon2App : public rex::ReXApp {
 
   // OnPreLaunchModule - register function hooks and extra symbolic aliases
   void OnPreLaunchModule() override {
+    InstallGuestPageFaultRecovery();
+
     auto* ks = rex::system::kernel_state();
     if (ks && ks->file_system()) {
       // Direct disc drive aliases to game root (game: is already mounted by ReXGlue via PathConfig)

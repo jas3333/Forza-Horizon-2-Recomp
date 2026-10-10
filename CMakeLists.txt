@@ -32,3 +32,11 @@ rexglue_setup_target(forzahorizon2 GPU_PLUGINS xenos)
 # links imgui PRIVATE -- that propagates the .lib to the final link but not
 # the include directory. Link it directly so this consumer sees the header.
 target_link_libraries(forzahorizon2 PRIVATE imgui)
+
+# The executable's RUNPATH is $ORIGIN, but the in-tree SDK writes
+# librexruntime.so into its own output directory. Put it next to the binary.
+if(NOT WIN32)
+    add_custom_command(TARGET forzahorizon2 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:rexruntime> $<TARGET_FILE_DIR:forzahorizon2>)
+endif()

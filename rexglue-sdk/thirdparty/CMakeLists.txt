@@ -64,7 +64,10 @@ if(REXGLUE_BUILD_TESTS)
 endif()
 
 foreach(submodule ${REQUIRED_SUBMODULES})
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/.git")
+    # The SDK is vendored into this repo without submodule metadata, so accept
+    # any populated directory rather than requiring a .git entry.
+    file(GLOB _submodule_contents "${CMAKE_CURRENT_SOURCE_DIR}/${submodule}/*")
+    if(NOT _submodule_contents)
         message(FATAL_ERROR
             "Git submodule '${submodule}' is not initialized.\n"
             "Please run: git submodule update --init --recursive\n"
