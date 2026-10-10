@@ -919,3 +919,37 @@ struct CallTraceAutoDump {
   }
 } g_call_trace_auto_dump;
 }  // namespace
+
+// FH2_RDOC_CAPTURE_SEC=<n>[,<m>...]: when running under RenderDoc
+// (renderdoccmd capture ...), trigger a frame capture after each listed
+// number of seconds.
+#include <rex/ui/renderdoc_api.h>
+namespace {
+struct RenderDocAutoCapture {
+  RenderDocAutoCapture() {
+    const char* v = std::getenv("FH2_RDOC_CAPTURE_SEC");
+    if (!v || !*v) return;
+    std::string spec = v;
+    std::thread([spec] {
+      auto rdoc = rex::ui::RenderDocAPI::CreateIfConnected();
+      if (!rdoc || !rdoc->api_1_0_0()) {
+        REXKRNL_WARN("[RDOC] RenderDoc not attached; no capture");
+        return;
+      }
+      int elapsed = 0;
+      size_t pos = 0;
+      while (pos < spec.size()) {
+        size_t comma = spec.find(',', pos);
+        int at = std::atoi(spec.substr(pos, comma - pos).c_str());
+        if (at > elapsed) std::this_thread::sleep_for(std::chrono::seconds(at - elapsed));
+        elapsed = std::max(elapsed, at);
+        rdoc->api_1_0_0()->TriggerCapture();
+        REXKRNL_WARN("[RDOC] capture triggered at {}s", at);
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+      }
+      std::this_thread::sleep_for(std::chrono::hours(24));  // keep the API loaded
+    }).detach();
+  }
+} g_renderdoc_auto_capture;
+}  // namespace

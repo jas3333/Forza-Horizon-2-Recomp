@@ -12,6 +12,10 @@
 #include <rex/logging.h>
 #include <rex/ui/renderdoc_api.h>
 
+#if REX_PLATFORM_LINUX
+#include <dlfcn.h>
+#endif
+
 namespace rex {
 namespace ui {
 
@@ -25,6 +29,17 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
 
   pRENDERDOC_GetAPI get_api = nullptr;
 
+#if REX_PLATFORM_LINUX
+  // Only attach if RenderDoc already injected itself (launched from
+  // renderdoccmd/qrenderdoc). A plain dlopen succeeds whenever RenderDoc is
+  // installed, loading it into every run, and its hooks keep the Wayland
+  // window from ever appearing.
+  void* handle = dlopen(platform::lib_names::kRenderDoc, RTLD_NOW | RTLD_NOLOAD);
+  if (!handle) {
+    return nullptr;
+  }
+  get_api = reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(handle, "RENDERDOC_GetAPI"));
+#else
   // Try to load the RenderDoc library. If RenderDoc is attached, the library
   // should already be loaded into the process and this will increment the
   // reference count. If not attached, the load will fail and we return nullptr.
@@ -32,6 +47,7 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
     return nullptr;
   }
   get_api = renderdoc_api->library_.GetSymbol<pRENDERDOC_GetAPI>("RENDERDOC_GetAPI");
+#endif
 
   // get_api will be null if RenderDoc is not connected, or the API isn't
   // available on this platform, or there was an error.

@@ -48,3 +48,16 @@ if(NOT WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:rexruntime> $<TARGET_FILE_DIR:forzahorizon2>)
 endif()
+
+# POST_BUILD copies only run when the executable relinks, so a change that
+# only rebuilds the GPU plugin or the runtime left the old copies next to the
+# binary (and that copy is the one loaded). Stage them on every build.
+if(NOT WIN32)
+    add_custom_target(forzahorizon2_stage_libs ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:rexruntime> $<TARGET_FILE:rexgpu-xenos>
+                $<TARGET_FILE_DIR:forzahorizon2>
+        DEPENDS rexruntime rexgpu-xenos
+        COMMENT "Staging runtime and GPU plugin next to forzahorizon2")
+    add_dependencies(forzahorizon2 forzahorizon2_stage_libs)
+endif()

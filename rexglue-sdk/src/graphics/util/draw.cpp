@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <set>
 #include <cmath>
 #include <cstring>
 
@@ -1186,6 +1188,25 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
   return true;
 }
 
+// From Xenia d11950528: the fast resolve is a raw copy, which is only right
+// if copy_dest_number asks for the encoding the EDRAM bits already have.
+// Otherwise (e.g. a float render target resolved to a fixed-point
+// destination) the full shader must convert.
+static constexpr bool ColorResolveNumberFormatMatches(xenos::ColorFormat color_format,
+                                                      xenos::SurfaceNumberFormat num_format) {
+  switch (color_format) {
+    case xenos::ColorFormat::k_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_FLOAT:
+    case xenos::ColorFormat::k_16_16_16_16_FLOAT:
+    case xenos::ColorFormat::k_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_FLOAT:
+    case xenos::ColorFormat::k_32_32_32_32_FLOAT:
+      return num_format == xenos::SurfaceNumberFormat::kFloat;
+    default:
+      return num_format == xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction;
+  }
+}
+
 ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale_x,
                                                   uint32_t draw_resolution_scale_y,
                                                   ResolveCopyShaderConstants& constants_out,
@@ -1200,7 +1221,9 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale
        xenos::IsSingleCopySampleSelected(copy_dest_coordinate_info.copy_sample_select) &&
        xenos::IsColorResolveFormatBitwiseEquivalent(
            xenos::ColorRenderTargetFormat(color_edram_info.format),
-           xenos::ColorFormat(copy_dest_info.copy_dest_format)))) {
+           xenos::ColorFormat(copy_dest_info.copy_dest_format)) &&
+       ColorResolveNumberFormatMatches(xenos::ColorFormat(copy_dest_info.copy_dest_format),
+                                       copy_dest_info.copy_dest_number))) {
     if (edram_info.msaa_samples >= xenos::MsaaSamples::k4X) {
       shader = source_is_64bpp ? ResolveCopyShaderIndex::kFast64bpp4xMSAA
                                : ResolveCopyShaderIndex::kFast32bpp4xMSAA;
@@ -1255,6 +1278,24 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(uint32_t draw_resolution_scale
     group_count_y_out = 0;
   }
 
+  {
+    // Diagnostic: log each distinct resolve format combination once.
+    static std::mutex seen_mutex;
+    static std::set<uint64_t> seen;
+    uint64_t key = (uint64_t(is_depth) << 40) | (uint64_t(edram_info.format) << 32) |
+                   (uint64_t(copy_dest_info.copy_dest_format) << 16) |
+                   (uint64_t(copy_dest_info.copy_dest_number) << 8) | uint64_t(shader);
+    std::lock_guard<std::mutex> lock(seen_mutex);
+    if (seen.insert(key).second) {
+      REXGPU_DEBUG("[RESOLVE] {} edram_format={} 64bpp={} dest_format={} dest_number={} "
+                  "exp_bias={} swap={} -> shader {}",
+                  is_depth ? "depth" : "color", uint32_t(edram_info.format),
+                  uint32_t(color_edram_info.format_is_64bpp), uint32_t(copy_dest_info.copy_dest_format),
+                  uint32_t(copy_dest_info.copy_dest_number),
+                  int32_t(copy_dest_info.copy_dest_exp_bias), uint32_t(copy_dest_info.copy_dest_swap),
+                  uint32_t(shader));
+    }
+  }
   return shader;
 }
 
