@@ -39,6 +39,8 @@
 
 REXCVAR_DEFINE_BOOL(vsync, true, "GPU", "Enable vertical sync");
 
+REXCVAR_DEFINE_BOOL(log_fps, false, "Diagnostics",
+                    "Log the guest frame rate (swaps per second) every 5 seconds.");
 REXCVAR_DEFINE_BOOL(diag_draw_rate, false, "Diagnostics",
                     "Log PM4 draw packets processed per second. A sudden multiple of the "
                     "normal rate (e.g. while paused) can indicate a runaway resubmission "
@@ -383,6 +385,21 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
+
+  // Fast path (as in Xenia): almost every write is a plain register with no
+  // side effects. Bitwise ORs keep the test branch-free; only the scratch,
+  // COHER and gamma LUT registers below need more. This used to do a
+  // GetRegisterInfo() lookup (a switch over the whole register table) on
+  // every write just for a debug message -- ~6% of the GPU thread.
+  unsigned special = (unsigned(index - XE_GPU_REG_SCRATCH_REG0) < 8u) |
+                     (index == XE_GPU_REG_COHER_STATUS_HOST) |
+                     (index == XE_GPU_REG_DC_LUT_RW_INDEX) |
+                     (index == XE_GPU_REG_DC_LUT_SEQ_COLOR) |
+                     (index == XE_GPU_REG_DC_LUT_PWL_DATA) |
+                     (index == XE_GPU_REG_DC_LUT_30_COLOR);
+  if (special == 0) [[likely]] {
+    return;
+  }
   if (!regs.GetRegisterInfo(index)) {
     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
   }
@@ -1002,6 +1019,27 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
   }
 #endif
   rex::perf::Profiler::Flip();
+
+  // --log_fps: guest frame rate (swaps reaching the GPU) every 5 seconds.
+  if (REXCVAR_GET(log_fps)) {
+    static auto window_start = std::chrono::steady_clock::now();
+    static auto last_swap = window_start;
+    static uint32_t frames = 0;
+    static double worst_ms = 0.0;
+    auto now = std::chrono::steady_clock::now();
+    double frame_ms = std::chrono::duration<double, std::milli>(now - last_swap).count();
+    last_swap = now;
+    worst_ms = std::max(worst_ms, frame_ms);
+    ++frames;
+    double window_s = std::chrono::duration<double>(now - window_start).count();
+    if (window_s >= 5.0) {
+      REXGPU_INFO("[FPS] {:.1f} fps (avg {:.1f} ms, worst {:.1f} ms over {:.1f} s)",
+                  frames / window_s, 1000.0 * window_s / frames, worst_ms, window_s);
+      window_start = now;
+      frames = 0;
+      worst_ms = 0.0;
+    }
+  }
 
   // Xenia-specific VdSwap hook.
   // VdSwap will post this to tell us we need to swap the screen/fire an
