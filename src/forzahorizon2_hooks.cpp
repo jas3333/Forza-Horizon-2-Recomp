@@ -301,9 +301,15 @@ extern "C" void __imp__NetDll_getsockopt(PPCContext& ctx, uint8_t* base) {
 // time one of them legitimately fails" -- worse, not better, until whatever
 // reads r3=0x2E1773D0 near lr=0x8246D7AC is made to tolerate a real
 // X_ERROR_NOT_FOUND/failed-lookup result instead of assuming success.
+// Signatures (as in Xenia's xam_msg.cc): XMsgStartIORequestEx(app r3,
+// message r4, overlapped r5, buffer r6, buffer_length r7, task_args r8) and
+// XMsgStartIORequest(app r3, message r4, overlapped r5, buffer r6,
+// buffer_length r7). These used to read the overlapped pointer from r8 / r7
+// (buffer_length), so the completion was written to whatever address those
+// held -- e.g. the "write of guest 0x00000054" access violation on every boot.
 extern "C" void __imp__XMsgStartIORequestEx(PPCContext& ctx, uint8_t* base) {
   (void)base;
-  uint32_t overlapped = ctx.r8.u32;
+  uint32_t overlapped = ctx.r5.u32;
   auto* ks = rex::system::kernel_state();
   if (ks && overlapped != 0) {
     ks->CompleteOverlappedImmediate(overlapped, 0);
@@ -313,7 +319,7 @@ extern "C" void __imp__XMsgStartIORequestEx(PPCContext& ctx, uint8_t* base) {
 
 extern "C" void __imp__XMsgStartIORequest(PPCContext& ctx, uint8_t* base) {
   (void)base;
-  uint32_t overlapped = ctx.r7.u32;
+  uint32_t overlapped = ctx.r5.u32;
   auto* ks = rex::system::kernel_state();
   if (ks && overlapped != 0) {
     ks->CompleteOverlappedImmediate(overlapped, 0);
@@ -731,7 +737,8 @@ extern "C" void __imp__XamUserGetSigninInfo(PPCContext& ctx, uint8_t* base) {
   uint32_t info_ptr = ctx.r5.u32;
   (void)flags;
   if (user_index == 0 && info_ptr != 0) {
-    *reinterpret_cast<uint64_t*>(base + info_ptr) = __builtin_bswap64(0xB13EBABEBABEBABEu);
+    *reinterpret_cast<uint64_t*>(base + info_ptr) =
+        __builtin_bswap64(rex::system::kernel_state()->user_profile()->xuid());
     *reinterpret_cast<uint32_t*>(base + info_ptr + 8) = __builtin_bswap32(1);
     *reinterpret_cast<uint32_t*>(base + info_ptr + 12) = __builtin_bswap32(1);
     *reinterpret_cast<uint32_t*>(base + info_ptr + 16) = 0;
@@ -754,10 +761,19 @@ extern "C" void __imp__XamShowSigninUI(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u64 = 0; // ERROR_SUCCESS
 }
 
+// XamShowDeviceSelectorUI(user_index r3, content_type r4, content_flags r5,
+// total_requested r6 (u64), device_id_ptr r7, overlapped r8). This used to
+// take r6/r7: it wrote the device id over whatever address the requested
+// size happened to be -- during saves that landed in the title's small-block
+// allocator and zeroed a free-list link, which later handed out live blocks
+// twice (SQLite then freed mismatched pointers, the main heap's free lists
+// were corrupted and the allocator spun forever: the frozen title screen)
+// -- and "completed" the real device id variable as if it were the
+// overlapped structure.
 extern "C" void __imp__XamShowDeviceSelectorUI(PPCContext& ctx, uint8_t* base) {
   (void)base;
-  uint32_t out_device_id_ptr = ctx.r6.u32;
-  uint32_t overlapped_ptr = ctx.r7.u32;
+  uint32_t out_device_id_ptr = ctx.r7.u32;
+  uint32_t overlapped_ptr = ctx.r8.u32;
   if (out_device_id_ptr != 0) {
     *reinterpret_cast<uint32_t*>(base + out_device_id_ptr) = __builtin_bswap32(0x00000001); // Device ID 1 (Hard Drive)
   }
@@ -798,8 +814,16 @@ extern "C" void __imp__XamContentGetDeviceData(PPCContext& ctx, uint8_t* base) {
   }
 }
 
+// XamContentGetDeviceState(device_id r3, overlapped r4).
 extern "C" void __imp__XamContentGetDeviceState(PPCContext& ctx, uint8_t* base) {
   (void)base;
+  uint32_t overlapped_ptr = ctx.r4.u32;
+  auto* ks = rex::system::kernel_state();
+  if (ks && overlapped_ptr) {
+    ks->CompleteOverlappedImmediate(overlapped_ptr, 0);
+    ctx.r3.u64 = 0x3E5;  // ERROR_IO_PENDING, as for other overlapped XAM calls
+    return;
+  }
   ctx.r3.u64 = 0; // Device ready / mounted
 }
 
