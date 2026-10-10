@@ -13,7 +13,7 @@
 #include <cstring>
 #include <utility>
 
-#if REX_PLATFORM_MAC
+#if REX_PLATFORM_MAC || defined(__linux__)
 #include <sys/mman.h>
 #endif
 
@@ -1340,12 +1340,6 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
     }
   }
 
-  std::vector<bool> was_committed(page_count);
-  for (uint32_t i = 0; i < page_count; ++i) {
-    was_committed[i] =
-        (page_table_[start_page_number + i].state & memory::kMemoryAllocationCommit) != 0;
-  }
-
   // Allocate from host.
   if (allocation_type == memory::kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
@@ -1378,10 +1372,6 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
   }
 
-  if (allocation_type & memory::kMemoryAllocationCommit) {
-    ZeroNewlyCommittedPages(start_page_number, end_page_number, was_committed);
-  }
-
   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
     return false;
   }
@@ -1395,26 +1385,33 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
   return true;
 }
 
-void BaseHeap::ZeroNewlyCommittedPages(uint32_t start_page_number, uint32_t end_page_number,
-                                       const std::vector<bool>& was_committed) {
+void BaseHeap::ZeroCommittedPages(uint32_t start_page_number, uint32_t end_page_number) {
   // Only whole host pages can be made writable independently.
   if (page_size_ < memory_->system_page_size_) {
     return;
   }
   uint32_t page = start_page_number;
   while (page <= end_page_number) {
-    if (was_committed[page - start_page_number]) {
+    if (!(page_table_[page].state & memory::kMemoryAllocationCommit)) {
       ++page;
       continue;
     }
     uint32_t run_start = page;
-    while (page <= end_page_number && !was_committed[page - start_page_number]) {
+    while (page <= end_page_number &&
+           (page_table_[page].state & memory::kMemoryAllocationCommit)) {
       ++page;
     }
     void* host = TranslateRelative(run_start << page_size_shift_);
     size_t length = size_t(page - run_start) << page_size_shift_;
-    // The final access is applied by SyncHostPageAccess right after this.
+    // Callers re-apply the final access through SyncHostPageAccess.
     rex::memory::Protect(host, length, rex::memory::PageAccess::kReadWrite, nullptr);
+#if defined(__linux__)
+    // Punch a hole in the shared backing: frees the pages and makes the range
+    // read back as zero without touching (and thereby allocating) anything.
+    if (madvise(host, length, MADV_REMOVE) == 0) {
+      continue;
+    }
+#endif
     std::memset(host, 0, length);
   }
 }
@@ -1566,11 +1563,6 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
   }
 
-  if (allocation_type & memory::kMemoryAllocationCommit) {
-    ZeroNewlyCommittedPages(start_page_number, end_page_number,
-                            std::vector<bool>(page_count, false));
-  }
-
   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
     return false;
   }
@@ -1608,6 +1600,8 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
     return false;
   }*/
 
+  ZeroCommittedPages(start_page_number, end_page_number);
+
   // Perform table change.
   for (uint32_t page_number = start_page_number; page_number <= end_page_number; ++page_number) {
     auto& page_entry = page_table_[page_number];
@@ -1643,6 +1637,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   if (out_region_size) {
     *out_region_size = (base_page_entry.region_page_count << page_size_shift_);
   }
+
+  ZeroCommittedPages(base_page_number,
+                     base_page_number + base_page_entry.region_page_count - 1);
 
   // Release from host not needed as mapping reserves the range for us.
   // TODO(benvanik): protect with NOACCESS?
