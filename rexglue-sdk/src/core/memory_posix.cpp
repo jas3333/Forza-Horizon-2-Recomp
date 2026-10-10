@@ -483,6 +483,11 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
     shm_unlink(full_path.c_str());
     return kFileMappingHandleInvalid;
   }
+  // Everything maps through the descriptor, never the name, so drop the name
+  // now. Otherwise any exit that skips CloseFileMappingHandle (the title's
+  // hard exit, a crash, a kill) leaks a multi-GiB object in /dev/shm whose
+  // touched pages stay resident until /dev/shm fills and mappings SIGBUS.
+  shm_unlink(full_path.c_str());
   return static_cast<FileMappingHandle>(ret);
 #endif
 }
