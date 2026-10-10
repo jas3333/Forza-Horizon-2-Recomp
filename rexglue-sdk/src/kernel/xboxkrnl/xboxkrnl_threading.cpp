@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/kernel/xboxkrnl/threading.h>
@@ -42,6 +43,48 @@
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
 using rex::runtime::current_ppc_context;
+
+REXCVAR_DEFINE_BOOL(diag_events, false, "Diagnostics",
+                    "Log every guest event create/set/pulse/reset with its caller");
+
+namespace {
+// Guest return addresses up the PPC back chain: [sp] is the caller's sp and
+// each frame saves its lr at [caller_sp - 8] (stw r12,-8(r1) before stwu).
+std::string GuestBacktrace(const PPCContext* ctx, int max_frames = 10) {
+  if (!ctx) {
+    return {};
+  }
+  auto* memory = REX_KERNEL_STATE()->memory();
+  std::string out = fmt::format("{:08X}", static_cast<uint32_t>(ctx->lr));
+  uint32_t sp = ctx->r1.u32;
+  for (int i = 0; i < max_frames; ++i) {
+    if (sp < 0x70000000u || sp >= 0x80000000u) {
+      break;
+    }
+    uint32_t caller_sp = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual(sp));
+    if (caller_sp <= sp || caller_sp >= 0x80000000u) {
+      break;
+    }
+    uint32_t lr = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual(caller_sp - 8));
+    out += fmt::format(" {:08X}", lr);
+    sp = caller_sp;
+  }
+  return out;
+}
+
+// [EVDIAG] Event signalling trace. The main-thread boot stall is a wait on an
+// event that is signalled once and never again; WAITDIAG shows the waits, this
+// shows who signals (or resets) which event, keyed by handle and guest KEVENT.
+void EventDiag(const char* op, XEvent* ev, uint32_t extra = 0) {
+  if (!REXCVAR_GET(diag_events)) {
+    return;
+  }
+  auto* ctx = current_ppc_context();
+  REXKRNL_WARN("[EVDIAG] {} thread={:#x} handle={:#010x} kevent={:#010x} extra={:#x} bt=[{}]",
+               op, XThread::GetCurrentThreadHandle(), ev ? ev->handle() : 0u,
+               ev ? ev->guest_object() : 0u, extra, GuestBacktrace(ctx, 6));
+}
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -161,6 +204,13 @@ u32 ExCreateThread_entry(mapped_u32 handle_ptr, u32 stack_size, mapped_u32 threa
     if (thread_id_ptr) {
       *thread_id_ptr = thread->thread_id();
     }
+  }
+  if (REXCVAR_GET(diag_events)) {
+    REXKRNL_WARN("[THREADDIAG] created handle={:#010x} start={:#010x} xapi_startup={:#010x} "
+                 "context={:#010x} flags={:#x} bt=[{}]",
+                 thread->handle(), start_address.guest_address(), (uint32_t)xapi_thread_startup,
+                 start_context.guest_address(), (uint32_t)creation_flags,
+                 GuestBacktrace(current_ppc_context()));
   }
   REXKRNL_IMPORT_RESULT("ExCreateThread", "{:#x} handle={:#x} tid={}", result,
                         handle_ptr ? (uint32_t)*handle_ptr : 0,
@@ -475,6 +525,7 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
     return 0;
   }
 
+  EventDiag("KeSetEvent", ev.get());
   return ev->Set(increment, !!wait);
 }
 
@@ -489,6 +540,7 @@ u32 KePulseEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
     return 0;
   }
 
+  EventDiag("KePulseEvent", ev.get());
   return ev->Pulse(increment, !!wait);
 }
 
@@ -499,6 +551,7 @@ u32 KeResetEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr) {
     return 0;
   }
 
+  EventDiag("KeResetEvent", ev.get());
   return ev->Reset();
 }
 
@@ -530,6 +583,7 @@ u32 NtCreateEvent_entry(mapped_u32 handle_ptr, ppc_ptr_t<X_OBJECT_ATTRIBUTES> ob
   if (handle_ptr) {
     *handle_ptr = ev->handle();
   }
+  EventDiag("NtCreateEvent", ev.get(), (event_type << 4) | (initial_state & 1));
   return X_STATUS_SUCCESS;
 }
 
@@ -538,6 +592,7 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
 
   auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
   if (ev) {
+    EventDiag("NtSetEvent", ev.get());
     int32_t was_signalled = ev->Set(0, false);
     if (previous_state_ptr) {
       *previous_state_ptr = static_cast<uint32_t>(was_signalled);
@@ -558,6 +613,7 @@ u32 NtPulseEvent_entry(u32 handle, mapped_u32 previous_state_ptr) {
 
   auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
   if (ev) {
+    EventDiag("NtPulseEvent", ev.get());
     int32_t was_signalled = ev->Pulse(0, false);
     if (previous_state_ptr) {
       *previous_state_ptr = static_cast<uint32_t>(was_signalled);
@@ -574,6 +630,7 @@ uint32_t xeNtClearEvent(uint32_t handle) {
 
   auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
   if (ev) {
+    EventDiag("NtClearEvent", ev.get());
     ev->Reset();
   } else {
     result = X_STATUS_INVALID_HANDLE;
@@ -845,7 +902,17 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_
     return X_STATUS_ABANDONED_WAIT_0;
   }
 
+  bool diag = REXCVAR_GET(diag_events) && (!timeout_ptr || *timeout_ptr < (~0ULL - 2000000ull));
+  if (diag) {
+    REXKRNL_WARN("[WAITDIAG-KE] thread={:#x} handle={:#010x} kobj={:#010x} type={} bt=[{}]",
+                 XThread::GetCurrentThreadHandle(), object->handle(), object->guest_object(),
+                 static_cast<uint32_t>(object->type()), GuestBacktrace(current_ppc_context()));
+  }
   X_STATUS result = object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
+  if (diag) {
+    REXKRNL_WARN("[WAITDIAG-KE] thread={:#x} handle={:#010x} RETURNED result={:#010x}",
+                 XThread::GetCurrentThreadHandle(), object->handle(), result);
+  }
 
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
@@ -884,10 +951,12 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
     // fast enough to rotate away the run's own startup lines.
     bool interesting = !timeout_ptr || timeout < (~0ULL - 2000000ull);
     if (interesting) {
+      auto* wait_ctx = current_ppc_context();
       REXKRNL_WARN("[WAITDIAG] thread={:#x} handle={:#010x} type={} name='{}' timeout={:#x} "
-                   "alertable={}",
+                   "alertable={} bt=[{}]",
                    XThread::GetCurrentThreadHandle(), object_handle,
-                   static_cast<uint32_t>(object->type()), object->name(), timeout, alertable);
+                   static_cast<uint32_t>(object->type()), object->name(), timeout, alertable,
+                   GuestBacktrace(wait_ctx));
     }
     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
     if (interesting) {
@@ -914,6 +983,9 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
     auto object_ptr = REX_KERNEL_MEMORY()->TranslateVirtual(objects_ptr[n]);
     auto object_ref = XObject::GetNativeObject<XObject>(REX_KERNEL_STATE(), object_ptr);
     if (!object_ref) {
+      REXKRNL_WARN("[WAITDIAG-MULTI] KeWaitForMultipleObjects: bad object #{} {:#010x} -> "
+                   "INVALID_PARAMETER bt=[{}]",
+                   n, uint32_t(objects_ptr[n]), GuestBacktrace(current_ppc_context()));
       return X_STATUS_INVALID_PARAMETER;
     }
 
@@ -921,9 +993,23 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
   }
 
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  bool diag = REXCVAR_GET(diag_events) && (!timeout_ptr || timeout < (~0ULL - 2000000ull));
+  if (diag) {
+    std::string list;
+    for (auto& o : objects) {
+      list += fmt::format("{:#x}/{} ", o->handle(), static_cast<uint32_t>(o->type()));
+    }
+    REXKRNL_WARN("[WAITDIAG-MULTI] Ke thread={:#x} wait_all={} objs=[{}] bt=[{}]",
+                 XThread::GetCurrentThreadHandle(), wait_type, list,
+                 GuestBacktrace(current_ppc_context()));
+  }
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
       processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
+  if (diag) {
+    REXKRNL_WARN("[WAITDIAG-MULTI] Ke thread={:#x} RETURNED result={:#010x}",
+                 XThread::GetCurrentThreadHandle(), result);
+  }
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
   }
@@ -940,13 +1026,31 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
     uint32_t object_handle = handles[n];
     auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
     if (!object) {
+      REXKRNL_WARN("[WAITDIAG-MULTI] NtWaitForMultipleObjectsEx: bad handle #{} {:#010x} -> "
+                   "INVALID_PARAMETER bt=[{}]",
+                   n, object_handle, GuestBacktrace(current_ppc_context()));
       return X_STATUS_INVALID_PARAMETER;
     }
     objects.push_back(std::move(object));
   }
 
+  bool diag = REXCVAR_GET(diag_events) && (!timeout_ptr || *timeout_ptr < (~0ULL - 2000000ull));
+  if (diag) {
+    std::string list;
+    for (auto& o : objects) {
+      list += fmt::format("{:#x}/{} ", o->handle(), static_cast<uint32_t>(o->type()));
+    }
+    REXKRNL_WARN("[WAITDIAG-MULTI] Nt thread={:#x} wait_all={} objs=[{}] bt=[{}]",
+                 XThread::GetCurrentThreadHandle(), wait_type, list,
+                 GuestBacktrace(current_ppc_context()));
+  }
+
   auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects.data()), wait_type,
                                       6, wait_mode, alertable, timeout_ptr);
+  if (diag) {
+    REXKRNL_WARN("[WAITDIAG-MULTI] Nt thread={:#x} RETURNED result={:#010x}",
+                 XThread::GetCurrentThreadHandle(), result);
+  }
   if (alertable && result == X_STATUS_USER_APC) {
     XThread::GetCurrentThread()->DeliverAPCs();
   }

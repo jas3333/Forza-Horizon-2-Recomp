@@ -30,8 +30,14 @@ static void Hook_sub_824A5FC0(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u64 = 0;
 }
 
-// Voice/Kinect thread exit
-static void Hook_sub_82D93740(PPCContext& ctx, uint8_t* base) {
+// Was registered over 0x82D93740 as a "Voice/Kinect thread exit". It is
+// not: 0x82D93740 is the entry point of the 11-thread job worker pool that
+// sub_82D94508 starts during boot (one worker per ExCreateThread at
+// 0x82D94654). Stubbing it made every worker exit immediately, so the first
+// job the main thread queued (NtSetEvent from 0x8248A47C) was never run and
+// the main thread blocked forever waiting for its completion event. Kept
+// unregistered for reference.
+[[maybe_unused]] static void Hook_sub_82D93740(PPCContext& ctx, uint8_t* base) {
   (void)base;
   ctx.r3.u64 = 0;
 }
@@ -169,7 +175,6 @@ class Forzahorizon2App : public rex::ReXApp {
     auto* fd = runtime()->function_dispatcher();
     if (fd) {
       fd->SetFunction(0x824A5FC0, Hook_sub_824A5FC0);
-      fd->SetFunction(0x82D93740, Hook_sub_82D93740);
       fd->SetFunction(0x82D9F3E0, Hook_sub_82D9F3E0);
       fd->SetFunction(0x8245F9E0, Hook_sub_82D9F3E0);
 
