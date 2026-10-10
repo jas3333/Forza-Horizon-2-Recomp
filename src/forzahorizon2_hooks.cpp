@@ -815,3 +815,35 @@ extern "C" void __imp__XamContentGetDeviceName(PPCContext& ctx, uint8_t* base) {
     ctx.r3.u64 = 0;
   }
 }
+
+// Read-only diagnostic for the null call at lr=0x825272D8. sub_82527260
+// formats a query from the format string at 0x82012550 and the string at
+// [r3+36] (inline when its length field < 16, else a pointer -- MSVC SSO),
+// asks a factory (vtable+32) for a statement object, then calls its
+// vtable[184]. When the factory leaves the out-param at 0 that second call
+// lands on guest address 0. Log what is being queried, then run the real
+// body unchanged.
+extern "C" void __imp__sub_82527260(PPCContext& ctx, uint8_t* base);
+
+extern "C" REX_FUNC(sub_82527260) {
+  static std::atomic<uint32_t> call_count{0};
+  if (call_count.fetch_add(1) < 50) {
+    auto guest_cstr = [base](uint32_t addr) -> std::string {
+      if (addr == 0 || addr >= 0xC0000000u) {
+        return "<null>";
+      }
+      const char* p = reinterpret_cast<const char*>(base + addr);
+      return std::string(p, strnlen(p, 200));
+    };
+    uint32_t self = ctx.r3.u32;
+    uint32_t len = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + self + 36 + 20));
+    uint32_t arg = self + 36;
+    if (len >= 16) {
+      arg = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + self + 36));
+    }
+    REXKRNL_WARN("[Diag_82527260] fmt='{}' arg='{}' this={:08X} lr={:08X}",
+                 guest_cstr(0x82012550), guest_cstr(arg), self,
+                 static_cast<uint32_t>(ctx.lr));
+  }
+  __imp__sub_82527260(ctx, base);
+}
