@@ -3977,53 +3977,60 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return draw_fail("update_bindings");
   }
 
-  // Ensure vertex buffers are resident.
+  // Ensure vertex buffers are resident (port of Xenia c2674b19d). The
+  // per-frame residency cache was dropped: it skipped RequestRange for a
+  // buffer whose address and size were unchanged within the frame, so data
+  // the game rewrote in place mid-frame could be drawn stale. Instead, the
+  // ranges are collected and requested under one acquisition of the global
+  // critical region rather than locking once per buffer -- the guest's
+  // kernel calls contend on the same lock. SharedMemory only uploads pages
+  // that actually changed, so the repeated requests are cheap.
   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
-  for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-    uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
-    uint32_t j;
-    while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
-      vfetch_bits_remaining &= ~(uint32_t(1) << j);
-      uint32_t vfetch_index = i * 32 + j;
-      uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
-      if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
-        continue;
-      }
-      xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
-      switch (vfetch_constant.type) {
-        case xenos::FetchConstantType::kVertex:
-          break;
-        case xenos::FetchConstantType::kInvalidVertex:
-          if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+  {
+    uint32_t vfetch_addresses[96];
+    uint32_t vfetch_sizes[96];
+    uint32_t vfetch_queued = 0;
+    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+      uint32_t j;
+      while (rex::bit_scan_forward(vfetch_bits_remaining, &j)) {
+        vfetch_bits_remaining &= ~(uint32_t(1) << j);
+        uint32_t vfetch_index = i * 32 + j;
+        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
+        switch (vfetch_constant.type) {
+          case xenos::FetchConstantType::kVertex:
             break;
-          }
-          REXGPU_WARN(
-              "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" type! "
-              "This "
-              "is incorrect behavior, but you can try bypassing this by "
-              "launching Xenia with --gpu_allow_invalid_fetch_constants=true.",
-              vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+          case xenos::FetchConstantType::kInvalidVertex:
+            if (REXCVAR_GET(gpu_allow_invalid_fetch_constants)) {
+              break;
+            }
+            REXGPU_WARN(
+                "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" type! "
+                "This "
+                "is incorrect behavior, but you can try bypassing this by "
+                "launching Xenia with --gpu_allow_invalid_fetch_constants=true.",
+                vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+            return false;
+          default:
+            REXGPU_WARN("Vertex fetch constant {} ({:08X} {:08X}) is completely invalid!",
+                        vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
+            return false;
+        }
+        vfetch_addresses[vfetch_queued] = vfetch_constant.address;
+        vfetch_sizes[vfetch_queued++] = vfetch_constant.size;
+      }
+    }
+    if (vfetch_queued) {
+      auto global_lock = rex::thread::global_critical_region::AcquireDirect();
+      for (uint32_t i = 0; i < vfetch_queued; ++i) {
+        if (!shared_memory_->RequestRange(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
+          REXGPU_ERROR(
+              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
+              "memory",
+              vfetch_addresses[i] << 2, vfetch_sizes[i] << 2);
           return false;
-        default:
-          REXGPU_WARN("Vertex fetch constant {} ({:08X} {:08X}) is completely invalid!",
-                      vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
-          return false;
+        }
       }
-      VertexBufferState& state = vertex_buffer_states_[vfetch_index];
-      if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
-        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
-        continue;
-      }
-      if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
-        REXGPU_ERROR(
-            "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
-            "memory",
-            vfetch_constant.address << 2, vfetch_constant.size << 2);
-        return false;
-      }
-      state.address = vfetch_constant.address;
-      state.size = vfetch_constant.size;
-      vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
     }
   }
 
