@@ -37,6 +37,15 @@
 #include <rex/system/checkpoint.h>
 #include <rex/system/function_dispatcher.h>
 
+#include <cstdlib>
+
+// The POOLFREE diagnostics log every pool free (100k+ lines a minute in
+// gameplay); keep them for debugging but off unless FH2_POOLFREE_LOG is set.
+static const bool g_poolfree_log = [] {
+  const char* v = std::getenv("FH2_POOLFREE_LOG");
+  return v && *v && *v != '0';
+}();
+
 // Not declared by forzahorizon2_recomp.h itself -- each generated shard
 // forward-declares the specific helpers/subs it calls locally (see
 // generated/default/forzahorizon2_funcs.151.h).
@@ -117,7 +126,7 @@ loc_823F8720:
 	// obj=pool/heap object (r3), item=block being freed (r4), extra=r5
 	// (0 takes the early-return path; non-zero is the size/flags value
 	// used for bucket selection), caller_lr=who called us.
-	REXLOG_WARN(
+	if (g_poolfree_log) REXLOG_WARN(
 		"[POOLFREE-823F8718] obj=0x{:08X} item=0x{:08X} extra=0x{:08X} caller_lr=0x{:08X}",
 		ctx.r30.u32, ctx.r28.u32, ctx.r29.u32, rex_entry_lr_);
 	// lwz r11,20(r3)
@@ -456,7 +465,7 @@ loc_823F891C:
 	// everything needed to identify the pool object and item before we
 	// touch memory, so a live capture tells us the real values without
 	// needing the crash to happen again blind.
-	REXLOG_WARN(
+	if (g_poolfree_log) REXLOG_WARN(
 		"[POOLFREE-COALESCE-823F8718] pool_obj=0x{:08X} item=0x{:08X} "
 		"adj_r29=0x{:08X} flink_candidate=0x{:08X} blink_candidate=0x{:08X}",
 		ctx.r30.u32, ctx.r28.u32, ctx.r29.u32, ctx.r11.u32, ctx.r10.u32);

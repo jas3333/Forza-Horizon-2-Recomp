@@ -13,7 +13,10 @@
 #include <rex/logging.h>
 #include <rex/ui/renderdoc_api.h>
 
-REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, false, "GPU",
+// FH2: on, as in the user's Xenia config. Forza Horizon 2 issues tens of
+// thousands of draws a minute with an "invalid"-typed fetch constant; with
+// this off they were all dropped (and each logged twice).
+REXCVAR_DEFINE_BOOL(gpu_allow_invalid_fetch_constants, true, "GPU",
                     "Allow invalid fetch constants");
 REXCVAR_DEFINE_BOOL(native_2x_msaa, true, "GPU", "Enable native 2x MSAA");
 REXCVAR_DEFINE_BOOL(depth_float24_round, false, "GPU", "Round float24 depth values");

@@ -674,10 +674,12 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment, u
   // [WAITDIAG-RELEASE] 2026-09-02: correlating against a main-thread stall
   // parked forever in NtWaitForSingleObjectEx on a Semaphore handle -- see
   // if this specific handle is ever released by anyone.
-  REXKRNL_WARN("[WAITDIAG-RELEASE] thread={:#x} Ke handle={:#010x} adjustment={} "
-               "previous_count={} success={}",
-               XThread::GetCurrentThreadHandle(), sem->handle(), adjustment, previous_count,
-               success);
+  if (REXCVAR_GET(diag_events)) {
+    REXKRNL_WARN("[WAITDIAG-RELEASE] thread={:#x} Ke handle={:#010x} adjustment={} "
+                 "previous_count={} success={}",
+                 XThread::GetCurrentThreadHandle(), sem->handle(), adjustment, previous_count,
+                 success);
+  }
   return static_cast<uint32_t>(previous_count);
 }
 
@@ -735,10 +737,12 @@ u32 NtReleaseSemaphore_entry(u32 sem_handle, u32 release_count, mapped_u32 previ
       result = X_STATUS_SEMAPHORE_LIMIT_EXCEEDED;
     }
     // [WAITDIAG-RELEASE] 2026-09-02: see xeKeReleaseSemaphore for context.
-    REXKRNL_WARN("[WAITDIAG-RELEASE] thread={:#x} Nt handle={:#010x} release_count={} "
-                 "previous_count={} success={}",
-                 XThread::GetCurrentThreadHandle(), sem_handle, release_count, previous_count,
-                 success);
+    if (REXCVAR_GET(diag_events)) {
+      REXKRNL_WARN("[WAITDIAG-RELEASE] thread={:#x} Nt handle={:#010x} release_count={} "
+                   "previous_count={} success={}",
+                   XThread::GetCurrentThreadHandle(), sem_handle, release_count, previous_count,
+                   success);
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -949,7 +953,8 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
     // Tight per-frame polls (timeout=0 or a few ms, i.e. unsigned value
     // very close to UINT64_MAX) are excluded -- they were flooding the log
     // fast enough to rotate away the run's own startup lines.
-    bool interesting = !timeout_ptr || timeout < (~0ULL - 2000000ull);
+    bool interesting = REXCVAR_GET(diag_events) &&
+                       (!timeout_ptr || timeout < (~0ULL - 2000000ull));
     if (interesting) {
       auto* wait_ctx = current_ppc_context();
       REXKRNL_WARN("[WAITDIAG] thread={:#x} handle={:#010x} type={} name='{}' timeout={:#x} "
@@ -1079,7 +1084,8 @@ u32 NtSignalAndWaitForSingleObjectEx_entry(u32 signal_handle, u32 wait_handle, u
     // checkpoint-boundary probe that the main guest thread can go silent for
     // 30+ seconds parked right after a call into this exact function, with
     // no prior WAITDIAG coverage to show what it was waiting on.
-    bool interesting = !timeout_ptr || timeout < (~0ULL - 2000000ull);
+    bool interesting = REXCVAR_GET(diag_events) &&
+                       (!timeout_ptr || timeout < (~0ULL - 2000000ull));
     if (interesting) {
       REXKRNL_WARN(
           "[WAITDIAG-SIGNAL] thread={:#x} signal_handle={:#010x} signal_type={} "
