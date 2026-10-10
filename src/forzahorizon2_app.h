@@ -149,7 +149,8 @@ class Forzahorizon2App : public rex::ReXApp {
       // X_ERROR_ALREADY_EXISTS the moment the package path exists, so
       // pre-creating it makes the game believe it has a save it never wrote,
       // and it then reads an empty PlayerDatabase instead of initializing one.
-      auto save_dir = user_data_root_ / "B13EBABEBABEBABE" / "4D530AA4" /
+      const std::string xuid_name = fmt::format("{:016X}", ks->user_profile()->xuid());
+      auto save_dir = user_data_root_ / xuid_name / "4D530AA4" /
                       "00000001" / "ForzaProfile";
       if (!std::filesystem::exists(save_dir)) {
         REXKRNL_INFO(
@@ -157,13 +158,12 @@ class Forzahorizon2App : public rex::ReXApp {
             "ContentManager so first-launch content creation succeeds.");
       } else {
         auto save_device = std::make_unique<rex::filesystem::HostPathDevice>(
-            "\\Device\\B13EBABEBABEBABE", save_dir, /*read_only=*/false,
+            "\\Device\\" + xuid_name, save_dir, /*read_only=*/false,
             /*allow_share_delete=*/true);
         if (save_device->Initialize()) {
           ks->file_system()->RegisterDevice(std::move(save_device));
-          ks->file_system()->RegisterSymbolicLink("B13EBABEBABEBABE:",
-                                                  "\\Device\\B13EBABEBABEBABE");
-          REXKRNL_INFO("[SaveMount] Pre-mounted B13EBABEBABEBABE: -> {}",
+          ks->file_system()->RegisterSymbolicLink(xuid_name + ":", "\\Device\\" + xuid_name);
+          REXKRNL_INFO("[SaveMount] Pre-mounted {}: -> {}", xuid_name,
                        save_dir.string());
         } else {
           REXKRNL_WARN("[SaveMount] Failed to initialize save device at {}",

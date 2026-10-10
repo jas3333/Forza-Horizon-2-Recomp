@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <cstdlib>
 #include <sstream>
 
 #include <fmt/format.h>
@@ -20,6 +21,9 @@
 
 REXCVAR_DEFINE_STRING(user_name, "User", "Kernel",
                       "Offline profile gamertag (truncated to 15 characters)");
+REXCVAR_DEFINE_STRING(user_xuid, "B13EBABEBABEBABE", "Kernel",
+                      "Signed-in profile XUID (hex). Offline profiles use the 0xE0... range; "
+                      "titles may treat other values as Xbox Live accounts");
 
 namespace rex {
 namespace system {
@@ -30,6 +34,14 @@ UserProfile::UserProfile() {
   // if non-zero, it prevents the user from playing the game.
   // "You do not have permissions to perform this operation."
   xuid_ = 0xB13EBABEBABEBABE;
+  {
+    std::string text(REXCVAR_GET(user_xuid));
+    char* end = nullptr;
+    uint64_t value = std::strtoull(text.c_str(), &end, 16);
+    if (!text.empty() && end && *end == '\0' && value != 0) {
+      xuid_ = value;
+    }
+  }
   name_ = std::string(REXCVAR_GET(user_name)).substr(0, 15);
   if (name_.empty()) {
     name_ = "User";
