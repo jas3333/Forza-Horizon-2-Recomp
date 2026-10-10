@@ -17,9 +17,14 @@ void ReXModule_Register(rex::runtime::IModuleRegistrar* registrar) {
 {% else %}
 void {{ project }}_RegisterFunctions(rex::runtime::IModuleRegistrar* registrar) {
 {% endif %}
-{% for fn in functions %}{% if not fn.below_code_base or fn.is_import %}  registrar->SetFunction({{ fn.address }}, {{ fn.name }});
-{% for alias in fn.resume_aliases %}  registrar->SetFunction({{ alias }}, {{ fn.name }});
-{% endfor %}{% endif %}{% endfor %}}
+  // PPCFuncMappings ({{ project }}_init.cpp) holds exactly the entries to
+  // register, as a static table. Unrolling them into one SetFunction call
+  // each made this file a single ~475k-statement function that took minutes
+  // to compile.
+  for (const PPCFuncMapping* m = PPCFuncMappings; m->host; ++m) {
+    registrar->SetFunction(static_cast<uint32_t>(m->guest), m->host);
+  }
+}
 
 {% if is_dll %}
 // The runtime uses this baked layout for the dispatch table. It must match the

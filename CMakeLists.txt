@@ -28,6 +28,14 @@ endif()
 
 rexglue_setup_target(forzahorizon2 GPU_PLUGINS xenos)
 
+# The generated function tables are one giant initializer each (~475k
+# entries). Optimizing them buys nothing and the register table alone took
+# ~6.5 min at -O2, serially, at the end of every regeneration build.
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/generated/default/forzahorizon2_register.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/generated/default/forzahorizon2_init.cpp
+    PROPERTIES COMPILE_OPTIONS "-O0" SKIP_PRECOMPILE_HEADERS ON)
+
 # rex_app.cpp (added by rexglue_configure_target) needs imgui.h, but rexruntime
 # links imgui PRIVATE -- that propagates the .lib to the final link but not
 # the include directory. Link it directly so this consumer sees the header.
