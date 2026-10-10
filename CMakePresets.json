@@ -27,8 +27,15 @@
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++",
                 "CMAKE_C_FLAGS": "-march=x86-64-v2",
-                "CMAKE_CXX_FLAGS": "-march=x86-64-v2",
+                "CMAKE_CXX_FLAGS": "-march=x86-64-v2 -Xclang -fno-pch-timestamp",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
                 "REXSDK_DIR": "${sourceDir}/rexglue-sdk"
+            },
+            "environment": {
+                "CCACHE_SLOPPINESS": "pch_defines,time_macros,include_file_mtime,include_file_ctime",
+                "CCACHE_MAXSIZE": "30G",
+                "CCACHE_BASEDIR": "${sourceDir}"
             },
             "condition": {
                 "type": "equals",
