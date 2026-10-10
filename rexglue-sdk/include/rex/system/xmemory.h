@@ -233,6 +233,12 @@ class BaseHeap {
   // Callers must hold the global critical region - see
   // AcquireHostPageReconcileLock.
   bool SyncHostPageAccess(uint32_t start_page_number, uint32_t end_page_number);
+  // Zero pages in [start, end] that were not committed before this call.
+  // Guest code relies on freshly committed memory reading as zero (the title
+  // heap re-commits pages it decommitted and trusts them to be clean), but
+  // decommit cannot discard data on a shared host mapping.
+  void ZeroNewlyCommittedPages(uint32_t start_page_number, uint32_t end_page_number,
+                               const std::vector<bool>& was_committed);
 
   // Acquires the global critical region for operations that will run the host
   // page reconcile pass, which reads watch state guarded by it.

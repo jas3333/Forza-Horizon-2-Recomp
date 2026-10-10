@@ -1340,6 +1340,12 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
     }
   }
 
+  std::vector<bool> was_committed(page_count);
+  for (uint32_t i = 0; i < page_count; ++i) {
+    was_committed[i] =
+        (page_table_[start_page_number + i].state & memory::kMemoryAllocationCommit) != 0;
+  }
+
   // Allocate from host.
   if (allocation_type == memory::kMemoryAllocationReserve) {
     // Reserve is not needed, as we are mapped already.
@@ -1372,6 +1378,10 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
   }
 
+  if (allocation_type & memory::kMemoryAllocationCommit) {
+    ZeroNewlyCommittedPages(start_page_number, end_page_number, was_committed);
+  }
+
   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
     return false;
   }
@@ -1383,6 +1393,30 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
   }
 
   return true;
+}
+
+void BaseHeap::ZeroNewlyCommittedPages(uint32_t start_page_number, uint32_t end_page_number,
+                                       const std::vector<bool>& was_committed) {
+  // Only whole host pages can be made writable independently.
+  if (page_size_ < memory_->system_page_size_) {
+    return;
+  }
+  uint32_t page = start_page_number;
+  while (page <= end_page_number) {
+    if (was_committed[page - start_page_number]) {
+      ++page;
+      continue;
+    }
+    uint32_t run_start = page;
+    while (page <= end_page_number && !was_committed[page - start_page_number]) {
+      ++page;
+    }
+    void* host = TranslateRelative(run_start << page_size_shift_);
+    size_t length = size_t(page - run_start) << page_size_shift_;
+    // The final access is applied by SyncHostPageAccess right after this.
+    rex::memory::Protect(host, length, rex::memory::PageAccess::kReadWrite, nullptr);
+    std::memset(host, 0, length);
+  }
 }
 
 bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t size,
@@ -1530,6 +1564,11 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t 
     page_entry.allocation_protect = protect;
     page_entry.current_protect = protect;
     page_entry.state = memory::kMemoryAllocationReserve | allocation_type;
+  }
+
+  if (allocation_type & memory::kMemoryAllocationCommit) {
+    ZeroNewlyCommittedPages(start_page_number, end_page_number,
+                            std::vector<bool>(page_count, false));
   }
 
   if (!SyncHostPageAccess(start_page_number, end_page_number)) {
