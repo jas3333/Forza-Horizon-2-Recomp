@@ -205,7 +205,7 @@ size = 0x18
 # bounded (confirmed via get_basic_blocks: single block, 196 bytes,
 # 0x831D75A0-0x831D7663), so the size is exact, not estimated.
 [functions."831D75A0"]
-size = 0xC4
+size = 0x40C
 
 # Com save/cache limpos o arranque segue um caminho diferente (evita o
 # crash de vtable nula visto com um save pré-existente) e volta à classe de
@@ -395,3 +395,317 @@ size = 0x08
 
 [functions."82CBFCC8"]
 size = 0x08
+
+# Vtable forwarder thunks (lwz r11,0(r3); lwz r11,N(r11); mtctr r11; bctr)
+# that are only reachable through vtables, so the function scan missed them.
+# Found by scanning the loaded image for the pattern at a function boundary
+# (previous word is blr/bctr/b/padding); 0x82F445B8 was hit after the
+# loading-screen fiber fix (lr=0x8245F9BC).
+[functions."82403008"]
+size = 0x10
+[functions."824B01D8"]
+size = 0x10
+[functions."824F9298"]
+size = 0x10
+[functions."824F92C8"]
+size = 0x10
+[functions."824F92D8"]
+size = 0x10
+[functions."824F9E68"]
+size = 0x10
+[functions."824F9E78"]
+size = 0x10
+[functions."824F9E88"]
+size = 0x10
+[functions."824F9E98"]
+size = 0x10
+[functions."824F9FD0"]
+size = 0x10
+[functions."824F9FE0"]
+size = 0x10
+[functions."825F37A0"]
+size = 0x10
+[functions."825F66A8"]
+size = 0x10
+[functions."825FEE10"]
+size = 0x10
+[functions."825FEE20"]
+size = 0x10
+[functions."825FF490"]
+size = 0x10
+[functions."82E699FC"]
+size = 0x10
+[functions."82F445A8"]
+size = 0x10
+[functions."82F445B8"]
+size = 0x10
+[functions."8301860C"]
+size = 0x10
+
+# Functions only reachable through addresses built at runtime (lis/addi) or
+# stored in data tables, which the function scan missed. Found by scanning the
+# loaded image; each starts right after a blr/bctr/b/padding, lies outside
+# every translated function, and runs to the next known function start.
+# 0x82F481F0 was hit from the message dispatcher at lr=0x8245F9BC.
+[functions."82460DC8"]
+size = 0x24
+[functions."8247FCE0"]
+size = 0x1c
+[functions."824F92E8"]
+size = 0x18
+[functions."824F9AF8"]
+size = 0x14
+[functions."824F9B90"]
+size = 0x14
+[functions."824F9CC0"]
+size = 0x14
+[functions."824F9EA8"]
+size = 0x14
+[functions."824F9FF0"]
+size = 0x24
+[functions."824FDEE8"]
+size = 0x10
+[functions."824FDEF8"]
+size = 0x10
+[functions."824FDF08"]
+size = 0x10
+[functions."824FDF18"]
+size = 0x10
+[functions."824FDF28"]
+size = 0x10
+[functions."824FDF38"]
+size = 0x10
+[functions."824FDF48"]
+size = 0x10
+[functions."824FDF58"]
+size = 0x10
+[functions."824FDF68"]
+size = 0x10
+[functions."824FDF78"]
+size = 0x10
+[functions."824FDF88"]
+size = 0x10
+[functions."824FDFB0"]
+size = 0x10
+[functions."825F3620"]
+size = 0x24
+[functions."825F3700"]
+size = 0x18
+[functions."825F37B0"]
+size = 0x14
+[functions."825F5C30"]
+size = 0x18
+[functions."825F6570"]
+size = 0x18
+[functions."825F6610"]
+size = 0x14
+[functions."825F66B8"]
+size = 0x14
+[functions."825FACC8"]
+size = 0x18
+[functions."825FAF88"]
+size = 0x18
+[functions."825FEE30"]
+size = 0x14
+[functions."825FF078"]
+size = 0x1c
+[functions."825FF3B0"]
+size = 0x28
+[functions."827BDEB0"]
+size = 0x28
+[functions."82836EB8"]
+size = 0xc
+[functions."8287E200"]
+size = 0x14
+[functions."829211A8"]
+size = 0x10
+[functions."82B3A5C8"]
+size = 0x4
+[functions."82B3A640"]
+size = 0x4
+[functions."82B43C50"]
+size = 0x14
+[functions."82B479D0"]
+size = 0x1c
+[functions."82B4DA78"]
+size = 0x78
+[functions."82B5A830"]
+size = 0x30
+[functions."82BC77A0"]
+size = 0x10
+[functions."82BC77B0"]
+size = 0x74
+[functions."82C015A0"]
+size = 0x4c
+[functions."82C015EC"]
+size = 0x4c
+[functions."82C1A0B8"]
+size = 0x8
+[functions."82C1A0C0"]
+size = 0x8
+[functions."82C1A0C8"]
+size = 0x8
+[functions."82C1A390"]
+size = 0x2c
+[functions."82C1C4F8"]
+size = 0x8
+[functions."82C1C500"]
+size = 0x8
+[functions."82C1C508"]
+size = 0x8
+[functions."82C1CC10"]
+size = 0x8
+[functions."82C1CC18"]
+size = 0x8
+[functions."82C1CC20"]
+size = 0x8
+[functions."82C2E0F8"]
+size = 0x24
+[functions."82C30AB0"]
+size = 0x8
+[functions."82C30AB8"]
+size = 0x8
+[functions."82C30AC0"]
+size = 0x8
+[functions."82DCF240"]
+size = 0x20
+[functions."82DCF260"]
+size = 0x2c
+[functions."82EDAAB0"]
+size = 0x2c
+[functions."82F47A18"]
+size = 0x1c
+[functions."82F47A50"]
+size = 0x14
+[functions."82F47E70"]
+size = 0x20
+[functions."82F47E90"]
+size = 0x14
+[functions."82F47EC0"]
+size = 0x18
+[functions."82F47ED8"]
+size = 0x18
+[functions."82F47EF0"]
+size = 0x2c
+[functions."82F47FA8"]
+size = 0x28
+[functions."82F47FD0"]
+size = 0x14
+[functions."82F48018"]
+size = 0x14
+[functions."82F48070"]
+size = 0x20
+[functions."82F48090"]
+size = 0x14
+[functions."82F481F0"]
+size = 0x14
+[functions."82F482A0"]
+size = 0x20
+[functions."82F482C0"]
+size = 0x1c
+[functions."82F488D8"]
+size = 0x18
+[functions."82F48978"]
+size = 0x14
+[functions."82F489A8"]
+size = 0x14
+[functions."82F489D8"]
+size = 0x18
+[functions."82F489F0"]
+size = 0x14
+[functions."82F48A20"]
+size = 0x14
+[functions."82F48BA0"]
+size = 0x14
+[functions."8300E008"]
+size = 0x20
+[functions."8300E028"]
+size = 0xc
+[functions."83139BD0"]
+size = 0xc
+[functions."831B0188"]
+size = 0x8
+[functions."831B0198"]
+size = 0x8
+[functions."831B1858"]
+size = 0x8
+[functions."831B1868"]
+size = 0x8
+[functions."831E8E28"]
+size = 0x14
+[functions."831E91A8"]
+size = 0x8
+[functions."831E91B0"]
+size = 0x8
+[functions."831E91B8"]
+size = 0x8
+[functions."831E91C0"]
+size = 0x8
+[functions."831EACF8"]
+size = 0x8
+[functions."831EAD00"]
+size = 0x24
+[functions."831EAEC8"]
+size = 0x8
+[functions."8322BBC8"]
+size = 0x2c
+[functions."8322EF78"]
+size = 0x4
+[functions."83237190"]
+size = 0x8
+[functions."83237198"]
+size = 0x8
+[functions."832371A0"]
+size = 0x8
+[functions."832371A8"]
+size = 0x8
+[functions."832371B0"]
+size = 0x8
+[functions."832371B8"]
+size = 0x8
+[functions."832371C0"]
+size = 0x8
+[functions."832371C8"]
+size = 0x8
+[functions."832371D0"]
+size = 0x8
+[functions."832371D8"]
+size = 0x8
+[functions."832371E0"]
+size = 0x8
+[functions."832371E8"]
+size = 0x8
+[functions."832371F0"]
+size = 0x8
+[functions."832371F8"]
+size = 0x8
+[functions."83237200"]
+size = 0x8
+[functions."83237F30"]
+size = 0x8
+[functions."8323AD50"]
+size = 0x8
+[functions."8323AD58"]
+size = 0x8
+[functions."8323AD60"]
+size = 0x8
+[functions."8323ADE8"]
+size = 0x8
+[functions."8323AE00"]
+size = 0x24
+[functions."8323F590"]
+size = 0x10
+[functions."8323F5A0"]
+size = 0x4
+[functions."8323F5F8"]
+size = 0x20
+[functions."8323F668"]
+size = 0x8
+[functions."8323F718"]
+size = 0x10
+[functions."8323F728"]
+size = 0x18
+[functions."8323F7A0"]
+size = 0x4
+[functions."8323F7E0"]
+size = 0xc

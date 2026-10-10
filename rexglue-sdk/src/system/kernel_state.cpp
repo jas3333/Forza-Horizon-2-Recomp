@@ -1112,6 +1112,21 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
     listener->EnqueueNotification(0x00000013, 0);
     listener->EnqueueNotification(0x00000013, 0);
   }
+  // As in Xenia: titles listening on the Live area wait to be told the
+  // connection state before carrying on. Report "logged off" once.
+  if (!has_notified_live_startup_ && listener->mask() & 0x00000002) {
+    has_notified_live_startup_ = true;
+    // XN_LIVE_CONNECTIONCHANGED: X_ONLINE_S_LOGON_DISCONNECTED
+    listener->EnqueueNotification(0x02000001, 0x001510F1);
+    // XN_LIVE_LINK_STATE_CHANGED: link down
+    listener->EnqueueNotification(0x02000003, 0);
+  }
+  // XN_XMP_PLAYBACKCONTROLLERCHANGED: the title owns playback (no system
+  // music player override).
+  if (!has_notified_xmp_startup_ && listener->mask() & 0x00000020) {
+    has_notified_xmp_startup_ = true;
+    listener->EnqueueNotification(0x0A000003, 1);
+  }
 }
 
 void KernelState::UnregisterNotifyListener(XNotifyListener* listener) {

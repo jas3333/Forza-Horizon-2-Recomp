@@ -362,6 +362,8 @@ class KernelState {
   std::unordered_map<uint32_t, XThread*> threads_by_id_;
   std::vector<object_ref<XNotifyListener>> notify_listeners_;
   bool has_notified_startup_ = false;
+  bool has_notified_live_startup_ = false;
+  bool has_notified_xmp_startup_ = false;
 
   // Protected by global_critical_region_.
   std::unordered_map<uint32_t, FiberInfo> fiber_map_;

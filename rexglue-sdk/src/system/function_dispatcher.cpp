@@ -35,7 +35,20 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
-static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* base) {
+  // Guest back chain: [sp] -> caller sp, saved lr at caller_sp - 8.
+  std::string bt;
+  uint32_t sp = ctx.r1.u32;
+  for (int i = 0; base && i < 12 && sp >= 0x10000u && sp < 0xF0000000u; ++i) {
+    uint32_t next = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + sp));
+    if (next <= sp || next >= 0xF0000000u) break;
+    bt += fmt::format(" {:08X}", __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + next - 8)));
+    sp = next;
+  }
+  REXLOG_CRITICAL("Invalid call detail: r11=0x{:08X} r27=0x{:08X} r28=0x{:08X} r29=0x{:08X} "
+            "r30=0x{:08X} r31=0x{:08X} current_function=0x{:08X} bt=[{} ]",
+            ctx.r11.u32, ctx.r27.u32, ctx.r28.u32, ctx.r29.u32, ctx.r30.u32, ctx.r31.u32,
+            ctx.current_function, bt);
   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} "
             "(caller lr=0x{:08X}) r3=0x{:08X} r4=0x{:08X} r1(sp)=0x{:08X} "
             "last_indirect_caller=0x{:08X} last_indirect_callsite=0x{:08X}",

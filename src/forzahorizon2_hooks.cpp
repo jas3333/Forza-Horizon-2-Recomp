@@ -11,6 +11,7 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmodule.h>
 #include <rex/system/xobject.h>
+#include <rex/system/xthread.h>
 #include <rex/kernel/crt/heap.h>
 
 #include "diagnostics/heap_tracker.h"
@@ -370,6 +371,27 @@ extern "C" void __imp__XexGetProcedureAddress(PPCContext& ctx, uint8_t* base) {
     }
   }
 
+  // Ask the loaded module for its real export first. The hardcoded tables
+  // below were guesses: the facade's ordinal 3 was mapped to 0x880503B8,
+  // which made the title call the wrong export (sub_880561C8 with a stack
+  // pointer and r4=5) and crash on the first movie.
+  if (resolved_addr == 0 && module_handle != 0) {
+    auto module = rex::system::XModule::GetFromHModule(ks, base + module_handle);
+    if (module) {
+      resolved_addr = module->GetProcAddressByOrdinal(static_cast<uint16_t>(ordinal),
+                                                      static_cast<uint32_t>(ctx.lr));
+      if (resolved_addr) {
+        static std::atomic<uint32_t> logged{0};
+        if (logged.fetch_add(1) < 64) {
+          uint32_t guessed = ordinal <= 14 ? GetXMediaExport(ordinal) : 0;
+          REXKRNL_INFO("[EXPORT] {} ordinal {} -> {:#010x} (old table {:#010x}) caller_lr={:#010x}",
+                       module->name(), ordinal, resolved_addr, guessed,
+                       static_cast<uint32_t>(ctx.lr));
+        }
+      }
+    }
+  }
+
   if (resolved_addr == 0) {
     if (ordinal >= 1 && ordinal <= 14) {
       module_name = "XMediaFacade";
@@ -601,37 +623,14 @@ extern "C" REX_FUNC(sub_8313E968) {
 // and is worse: a boot that reached the loading screen with ~5000 log lines
 // froze at ~1120 with the render thread stopped. Kept as-is until the
 // import target is identified and the whole family can move together.
-extern "C" REX_FUNC(sub_88050340) {
-  uint32_t size = ctx.r3.u32;
-  if (size == 0) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  uint32_t addr = rex::kernel::crt::GetHeap().Alloc(size, true);
-  recomp_diag::HeapTracker::Instance().OnAlloc(addr, size, static_cast<uint32_t>(ctx.lr),
-                                                "xmediafacade");
-  ctx.r3.u64 = addr;
-}
-
-extern "C" REX_FUNC(sub_8805C400) {
-  uint32_t size = ctx.r3.u32;
-  if (size == 0) {
-    ctx.r3.u64 = 0;
-    return;
-  }
-  uint32_t addr = rex::kernel::crt::GetHeap().Alloc(size, true);
-  recomp_diag::HeapTracker::Instance().OnAlloc(addr, size, static_cast<uint32_t>(ctx.lr),
-                                                "xmediafacade");
-  ctx.r3.u64 = addr;
-}
-
-extern "C" REX_FUNC(sub_8805C468) {
-  uint32_t ptr = ctx.r3.u32;
-  if (ptr != 0 && rex::kernel::crt::GetHeap().InHeap(ptr)) {
-    recomp_diag::HeapTracker::Instance().OnFree(ptr);
-    rex::kernel::crt::GetHeap().Free(ptr);
-  }
-}
+// REMOVED 2026-10-10: the overrides of sub_88050340 / sub_8805C400 /
+// sub_8805C468 that sent XMediaFacade allocations to the host CRT heap. They
+// dropped the XMemAlloc attribute word (r4, e.g. 0x208C800A from
+// sub_8805C788: alignment and memory type) and paired with frees that still
+// went through the module's own path. With them in place the first movie
+// (sub_8805C788) crashed calling a vtable slot holding string bytes. The
+// "worse without them" measurement above predates the XAM argument-register
+// fix (c388cd36), which removed the heap corruption that was confounding it.
 
 // ---------------------------------------------------------------------------
 // Listener-set notify guard for sub_82D97D60 -- TRIED AND REVERTED.
@@ -871,3 +870,52 @@ extern "C" REX_FUNC(sub_82527260) {
   }
   __imp__sub_82527260(ctx, base);
 }
+
+// FH2_SQLTRACE=1: log every SQL statement the title runs through its
+// "execute and collect rows" helper (sub_82D9F808, statement text in r5),
+// in the same "[SQL] r7=... <text>" format as the trace_guest_functions hook
+// in the local Xenia comparison fork, so the two streams can be diffed.
+extern "C" void __imp__sub_82D9F808(PPCContext& ctx, uint8_t* base);
+extern "C" REX_FUNC(sub_82D9F808) {
+  static const bool enabled = [] {
+    const char* v = std::getenv("FH2_SQLTRACE");
+    return v && *v && *v != '0';
+  }();
+  if (enabled && ctx.r5.u32 >= 0x10000u && ctx.r5.u32 < 0xC0000000u) {
+    const char* c = reinterpret_cast<const char*>(base + ctx.r5.u32);
+    std::string sql;
+    for (size_t i = 0; i < 90 && c[i]; ++i) sql += (c[i] >= 32 && c[i] < 127) ? c[i] : '.';
+    REXKRNL_INFO("[SQL] r7={:08X} {}", ctx.r7.u32, sql);
+  }
+  __imp__sub_82D9F808(ctx, base);
+}
+
+// FH2_CALLTRACE_DUMP_SEC=<n> (with --calltrace_kernel_calls): after n seconds,
+// log the main guest thread's ring buffer of recent kernel/XAM export calls --
+// the same dump the F8 bind produces, without needing a key press.
+#include <rex/system/checkpoint.h>
+namespace {
+struct CallTraceAutoDump {
+  CallTraceAutoDump() {
+    const char* v = std::getenv("FH2_CALLTRACE_DUMP_SEC");
+    if (!v || !*v) return;
+    int seconds = std::atoi(v);
+    std::thread([seconds] {
+      std::this_thread::sleep_for(std::chrono::seconds(seconds));
+      const char* tid_env = std::getenv("FH2_CALLTRACE_TID");
+      auto trace = tid_env ? rex::system::DumpThreadCallTraceById(uint32_t(std::atoi(tid_env)))
+                           : rex::system::DumpMainThreadCallTrace();
+      REXKRNL_WARN("[CALLTRACE-AUTO] {} call(s), oldest first:", trace.size());
+      std::string line;
+      for (size_t i = 0; i < trace.size(); ++i) {
+        line += trace[i];
+        line += ' ';
+        if ((i + 1) % 12 == 0 || i + 1 == trace.size()) {
+          REXKRNL_WARN("[CALLTRACE-AUTO] {}", line);
+          line.clear();
+        }
+      }
+    }).detach();
+  }
+} g_call_trace_auto_dump;
+}  // namespace

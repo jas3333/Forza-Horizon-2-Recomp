@@ -767,7 +767,16 @@ REX_EXPORT_STUB(__imp__XamWebInstrumentationSetUserVarNoEscape);
 REX_EXPORT_STUB(__imp__XamWriteBiometricData);
 REX_EXPORT_STUB(__imp__XamWriteGamerTileEx);
 REX_EXPORT_STUB(__imp__XamWriteTile);
-REX_EXPORT_STUB(__imp__XamXStudioRequest);
+// XamXStudioRequest(unk, unk_ptr): forwards to xstudio.xex, which we do not
+// have. As in Xenia, fail explicitly: a bare stub leaves r3 holding whatever
+// the caller had there, and titles poll this (Forza Horizon 2 calls it ~20x
+// a second on its loading screen and never gets a usable answer).
+extern "C" REX_FUNC(__imp__XamXStudioRequest) {
+  (void)base;
+  ctx.r3.u64 = 0x80004005u;  // X_E_FAIL
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__XamXStudioRequest(
+    "__imp__XamXStudioRequest", &__imp__XamXStudioRequest);
 REX_EXPORT_STUB(__imp__XamXgiBlobTrackerSetMockInfo);
 REX_EXPORT_STUB(__imp__XamXlfsInitializeUploadQueue);
 REX_EXPORT_STUB(__imp__XamXlfsInitializeUploadQueueWithTestHooks);
