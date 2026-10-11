@@ -96,6 +96,7 @@ void SharedMemory::InvalidateAllPages() {
   std::fill(system_page_flags_valid_.begin(), system_page_flags_valid_.end(), uint64_t(0));
   std::fill(system_page_flags_valid_and_gpu_written_.begin(),
             system_page_flags_valid_and_gpu_written_.end(), uint64_t(0));
+  invalidation_epoch_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
@@ -104,6 +105,7 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
   // Pages that are valid only because the CPU uploaded them lose their valid
   // bit here, so the next frame re-reads them from guest memory.
   system_page_flags_valid_ = system_page_flags_valid_and_gpu_written_;
+  invalidation_epoch_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void SharedMemory::ClearCache() {
@@ -541,6 +543,7 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
     system_page_flags_valid_[i] &= ~invalidate_bits;
     system_page_flags_valid_and_gpu_written_[i] &= ~invalidate_bits;
   }
+  invalidation_epoch_.fetch_add(1, std::memory_order_acq_rel);
 
   FireWatches(page_first, page_last, false);
 

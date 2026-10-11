@@ -61,7 +61,8 @@ struct Counters {
   uint64_t pipelines_created = 0;
   uint64_t transfers_materialized = 0;  // deferred copies made real later
   uint64_t direct_resolve_misses = 0;  // color resolves that couldn't be
-  uint64_t predicated_skips = 0;    // draws skipped by predicated tiling bin checks
+  uint64_t predicated_skips = 0;
+  uint64_t vfetch_requests_skipped = 0;  // vertex ranges known valid, not re-requested    // draws skipped by predicated tiling bin checks
   uint64_t gpu_category_ns[uint32_t(GpuCategory::kCount)] = {};
 };
 

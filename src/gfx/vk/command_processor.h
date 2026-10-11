@@ -299,6 +299,12 @@ class VulkanCommandProcessor : public CommandProcessor {
   void Fh2WaitSubmitted(uint64_t submission);
   void Fh2StopSubmitThread();
   std::thread fh2_submit_thread_;
+  struct Fh2VfetchCacheEntry {
+    uint32_t address = 0, size = 0;
+    uint64_t epoch = 0;
+  };
+  static constexpr uint32_t kFh2VfetchCacheSize = 1024;
+  Fh2VfetchCacheEntry fh2_vfetch_cache_[kFh2VfetchCacheSize];
   std::mutex fh2_submit_mutex_;
   std::condition_variable fh2_submit_cv_;
   std::condition_variable fh2_submitted_cv_;

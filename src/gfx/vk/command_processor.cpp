@@ -4221,14 +4221,36 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         vfetch_sizes[vfetch_queued++] = vfetch_constant.size;
       }
     }
+    // FH2: ranges requested since the shared memory's last invalidation are
+    // still valid -- skip them (and the global lock).
+    uint64_t fh2_epoch = shared_memory_->invalidation_epoch();
+    bool fh2_vfetch_disable_cache = fh2::rtlog::TimedEnvInt("FH2_VFETCH_CACHE", 1) == 0;
+    uint32_t fh2_vfetch_kept = 0;
+    for (uint32_t i = 0; i < vfetch_queued; ++i) {
+      // FH2: vertex data read from resolve output keeps that resolve's
+      // guest memory write (the skip-memory guard).
+      if (fh2::rtlog::OverlapsResolveDest(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
+        fh2::rtlog::NoteNonTextureReader(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2);
+      }
+      const Fh2VfetchCacheEntry& entry =
+          fh2_vfetch_cache_[(vfetch_addresses[i] * 0x9E3779B1u ^ vfetch_sizes[i]) &
+                            (kFh2VfetchCacheSize - 1)];
+      if (fh2_vfetch_disable_cache || entry.epoch != fh2_epoch ||
+          entry.address != vfetch_addresses[i] || entry.size != vfetch_sizes[i]) {
+        vfetch_addresses[fh2_vfetch_kept] = vfetch_addresses[i];
+        vfetch_sizes[fh2_vfetch_kept++] = vfetch_sizes[i];
+      } else {
+        ++fh2::rtlog::g_counters.vfetch_requests_skipped;
+      }
+    }
+    vfetch_queued = fh2_vfetch_kept;
     if (vfetch_queued) {
       auto global_lock = rex::thread::global_critical_region::AcquireDirect();
       for (uint32_t i = 0; i < vfetch_queued; ++i) {
-        // FH2: vertex data read from resolve output keeps that resolve's
-        // guest memory write (the skip-memory guard).
-        if (fh2::rtlog::OverlapsResolveDest(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
-          fh2::rtlog::NoteNonTextureReader(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2);
-        }
+        Fh2VfetchCacheEntry& entry =
+            fh2_vfetch_cache_[(vfetch_addresses[i] * 0x9E3779B1u ^ vfetch_sizes[i]) &
+                              (kFh2VfetchCacheSize - 1)];
+        entry.epoch = 0;
         if (!shared_memory_->RequestRange(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
           REXGPU_ERROR(
               "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
@@ -4236,6 +4258,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
               vfetch_addresses[i] << 2, vfetch_sizes[i] << 2);
           return false;
         }
+        // The epoch from before the request: an invalidation during it
+        // leaves the entry stale.
+        entry.address = vfetch_addresses[i];
+        entry.size = vfetch_sizes[i];
+        entry.epoch = fh2_epoch;
       }
     }
   }
