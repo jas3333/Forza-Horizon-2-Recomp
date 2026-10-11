@@ -1240,8 +1240,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
       }
       Fh2DirectResolve skip_direct;
       const char* skip_miss_reason = nullptr;
-      if (!dump_rectangles_.empty() &&
-          Fh2PrepareDirectResolve(resolve_info, texture_cache, skip_direct, skip_miss_reason)) {
+      std::vector<VulkanTextureCache::Fh2ResolveTarget> skip_targets;
+      bool skip_ok = !dump_rectangles_.empty() &&
+                     Fh2PrepareDirectResolve(resolve_info, texture_cache, skip_direct,
+                                             skip_miss_reason);
+      if (skip_ok) {
+        for (const auto& write : skip_direct.writes) skip_targets.push_back(write.target);
+        bool memory_resolves_nearby = false;
+        for (const auto& target : skip_targets) {
+          memory_resolves_nearby |= fh2::rtlog::OverlapsRecentMemoryResolve(
+              target.texture->key().base_page << 12, target.texture->GetGuestBaseSize());
+        }
+        if (memory_resolves_nearby ||
+            texture_cache.Fh2RangeHasOtherReaders(resolve_info.copy_dest_extent_start,
+                                                  resolve_info.copy_dest_extent_length,
+                                                  skip_targets)) {
+          skip_ok = false;
+          ++fh2::rtlog::g_counters.resolves_memory_kept;
+          fh2::rtlog::Log("    guest memory kept: {}",
+                          memory_resolves_nearby ? "memory resolves into the same texture"
+                                                 : "other textures read this range");
+        }
+      }
+      if (skip_ok) {
         texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
                                           resolve_info.copy_dest_extent_length);
         Fh2RecordDirectResolve(texture_cache, skip_direct);
@@ -1381,6 +1402,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
 
+          fh2::rtlog::NoteMemoryResolve(resolve_info.copy_dest_extent_start,
+                                        resolve_info.copy_dest_extent_length);
           // FH2: find the texture this resolve can write directly before the
           // invalidation below marks it outdated.
           Fh2DirectResolve fh2_direct;

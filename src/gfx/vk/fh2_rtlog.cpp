@@ -43,6 +43,22 @@ std::map<uint32_t, uint32_t> g_resolve_dests;
 
 }  // namespace
 
+std::vector<std::pair<uint32_t, uint32_t>> g_memory_resolves[2];  // [current, previous]
+
+void NoteMemoryResolve(uint32_t address, uint32_t length) {
+  if (length) g_memory_resolves[0].emplace_back(address, address + length);
+}
+
+bool OverlapsRecentMemoryResolve(uint32_t address, uint32_t length) {
+  uint32_t end = address + length;
+  for (const auto& list : g_memory_resolves) {
+    for (const auto& range : list) {
+      if (range.first < end && range.second > address) return true;
+    }
+  }
+  return false;
+}
+
 void NoteResolveDest(uint32_t address, uint32_t length) {
   if (!length) return;
   uint32_t& end = g_resolve_dests[address];
@@ -163,6 +179,8 @@ void OnSwap() {
     g_frames_left = kFramesPerCapture;
     REXGPU_INFO("[RTLOG] ==== capture start at {:.1f} s (frame {}) ====", seconds, g_frame);
   }
+  g_memory_resolves[1] = std::move(g_memory_resolves[0]);
+  g_memory_resolves[0].clear();
   // Forget old resolve destinations now and then; the game reuses them every
   // frame, so they come straight back.
   if (g_frame % 600 == 0) g_resolve_dests.clear();
@@ -177,7 +195,7 @@ void OnSwap() {
         "[RTSTAT] per frame (transfers mode {}): draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
         "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}, "
-        "direct resolves {:.1f} (misses {:.1f}, memory skipped {:.1f}), transfers narrowed {:.1f} skipped {:.1f} "
+        "direct resolves {:.1f} (misses {:.1f}, memory skipped {:.1f}, kept {:.1f}), transfers narrowed {:.1f} skipped {:.1f} "
         "deferred {:.1f} materialized {:.1f}",
         TransferModeName(CurrentTransferMode()), per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
@@ -188,6 +206,7 @@ void OnSwap() {
         per(c.predicated_skips, l.predicated_skips), per(c.direct_resolves, l.direct_resolves),
         per(c.direct_resolve_misses, l.direct_resolve_misses),
         per(c.resolves_memory_skipped, l.resolves_memory_skipped),
+        per(c.resolves_memory_kept, l.resolves_memory_kept),
         per(c.transfers_narrowed, l.transfers_narrowed),
         per(c.transfers_skipped, l.transfers_skipped),
         per(c.transfers_deferred, l.transfers_deferred),

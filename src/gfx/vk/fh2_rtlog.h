@@ -48,6 +48,7 @@ struct Counters {
   uint64_t gpu_ns = 0;              // GPU execution time of completed submissions
   uint64_t direct_resolves = 0;     // resolves written straight into textures
   uint64_t resolves_memory_skipped = 0;  // of those, without the guest memory write
+  uint64_t resolves_memory_kept = 0;     // skip refused: other textures read the range
   uint64_t transfers_narrowed = 0;  // transfers clipped to the rows written since
   uint64_t transfers_skipped = 0;   // transfers dropped (nothing written since)
   uint64_t transfers_deferred = 0;  // transfers skipped as nothing read the target yet
@@ -81,6 +82,11 @@ const char* TransferModeName(TransferMode mode);
 // Resolve destinations of the logged and recent frames, to tag texture loads
 // that read resolve output.
 void NoteResolveDest(uint32_t address, uint32_t length);
+// Resolves that went through guest memory (not direct), this frame and the
+// previous one: a texture over such a range may be reloaded from memory, so
+// the memory under it must stay valid.
+void NoteMemoryResolve(uint32_t address, uint32_t length);
+bool OverlapsRecentMemoryResolve(uint32_t address, uint32_t length);
 bool OverlapsResolveDest(uint32_t address, uint32_t length);
 
 template <typename... Args>

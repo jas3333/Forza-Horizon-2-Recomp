@@ -352,6 +352,11 @@ class VulkanTextureCache final : public TextureCache {
   void Fh2BeginResolveWrite(VulkanTexture& texture);
   void Fh2EndResolveWrite(VulkanTexture& texture);
   VkDescriptorSetLayout fh2_storage_set_layout() const { return fh2_storage_set_layout_; }
+  // Whether any texture ever loaded from resolve output in [start, start +
+  // length) is not among the given targets (then guest memory must still be
+  // written for it).
+  bool Fh2RangeHasOtherReaders(uint32_t start, uint32_t length,
+                               const std::vector<Fh2ResolveTarget>& targets) const;
   static bool Fh2IsDirectResolveFormat(xenos::TextureFormat format) {
     return format == xenos::TextureFormat::k_8_8_8_8 ||
            format == xenos::TextureFormat::k_2_10_10_10 ||
@@ -365,6 +370,13 @@ class VulkanTextureCache final : public TextureCache {
   void Fh2ShutdownDirectResolve();
   // Guest base address -> key of a texture loaded from resolve output.
   std::map<uint32_t, std::vector<TextureKey>> fh2_resolve_texture_keys_;
+  // Every texture (any format) that loaded base or mip data from resolve
+  // output: (start, end, key).
+  struct Fh2ResolveReader {
+    uint32_t start, end;
+    TextureKey key;
+  };
+  std::vector<Fh2ResolveReader> fh2_resolve_readers_;
   VkDescriptorSetLayout fh2_storage_set_layout_ = VK_NULL_HANDLE;
   VkDescriptorPool fh2_storage_pool_ = VK_NULL_HANDLE;
   bool fh2_storage_format_supported_[64] = {};

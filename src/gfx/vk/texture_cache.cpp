@@ -1242,6 +1242,15 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     ++counters.tex_loads;
     counters.tex_load_bytes += size;
     counters.tex_loads_resolved += from_resolve;
+    if (from_resolve) {
+      bool known = false;
+      for (const Fh2ResolveReader& reader : fh2_resolve_readers_) {
+        known |= reader.key == key && reader.start == address;
+      }
+      if (!known) {
+        fh2_resolve_readers_.push_back({address, address + size, key});
+      }
+    }
     if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage()) {
       std::vector<TextureKey>& keys = fh2_resolve_texture_keys_[key.base_page << 12];
       if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
@@ -3478,6 +3487,25 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
     target.height = key.GetHeight();
   }
   return !out.empty();
+}
+
+bool VulkanTextureCache::Fh2RangeHasOtherReaders(
+    uint32_t start, uint32_t length, const std::vector<Fh2ResolveTarget>& targets) const {
+  uint32_t end = start + length;
+  for (const Fh2ResolveReader& reader : fh2_resolve_readers_) {
+    if (reader.end <= start || reader.start >= end) {
+      continue;
+    }
+    bool is_target = false;
+    for (const Fh2ResolveTarget& target : targets) {
+      is_target |= target.texture->key() == reader.key &&
+                   reader.start == (reader.key.base_page << 12);
+    }
+    if (!is_target) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void VulkanTextureCache::Fh2BeginResolveWrite(VulkanTexture& texture) {
