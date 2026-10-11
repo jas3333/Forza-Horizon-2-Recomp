@@ -1407,12 +1407,25 @@ void HwWatchTrap(int, siginfo_t*, void*) {
   if (n >= 16) return;
   auto* ts = rex::runtime::ThreadState::Get();
   PPCContext* c = ts ? ts->context() : nullptr;
-  char buf[200];
+  char buf[400];
   int len = snprintf(buf, sizeof(buf),
-                     "[HWWATCH] write %08X #%d fn=%08X pc=%08X lr=%08X r3=%08X r31=%08X tid=%d\n",
+                     "[HWWATCH] write %08X #%d fn=%08X pc=%08X lr=%08X r3=%08X r31=%08X tid=%d bt=",
                      g_hw_guest, n, c ? c->current_function : 0u, c ? c->current_instruction : 0u,
                      c ? uint32_t(c->lr) : 0u, c ? c->r3.u32 : 0u, c ? c->r31.u32 : 0u,
                      int(syscall(SYS_gettid)));
+  // Guest call stack: walk the PPC back chain from r1 (saved LR at caller_sp - 8).
+  if (c && len > 0) {
+    uint8_t* membase = rex::system::kernel_state()->memory()->virtual_membase();
+    uint32_t sp = c->r1.u32;
+    for (int i = 0; i < 10 && sp >= 0x70000000u && sp < 0x80000000u && len < 380; ++i) {
+      uint32_t caller_sp = __builtin_bswap32(*reinterpret_cast<uint32_t*>(membase + sp));
+      if (caller_sp <= sp || caller_sp >= 0x80000000u) break;
+      uint32_t ret = __builtin_bswap32(*reinterpret_cast<uint32_t*>(membase + caller_sp - 8));
+      len += snprintf(buf + len, sizeof(buf) - size_t(len), " %08X", ret);
+      sp = caller_sp;
+    }
+  }
+  if (len > 0 && len < int(sizeof(buf)) - 1) buf[len++] = '\n';
   if (len > 0) (void)!write(2, buf, size_t(len));
 }
 void HwWatchArm(uint32_t guest) {
