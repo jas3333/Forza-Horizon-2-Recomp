@@ -27,6 +27,8 @@ struct Counters {
   uint64_t tex_loads = 0;
   uint64_t tex_load_bytes = 0;
   uint64_t tex_loads_resolved = 0;  // loads overlapping a resolve destination
+  uint64_t gpu_ns = 0;              // GPU execution time of completed submissions
+  uint64_t predicated_skips = 0;    // draws skipped by predicated tiling bin checks
 };
 
 extern Counters g_counters;

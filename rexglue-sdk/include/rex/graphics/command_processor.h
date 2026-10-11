@@ -266,6 +266,11 @@ class CommandProcessor {
   // them instead of dropping the write entirely.
   std::unordered_map<uint32_t, uint32_t> extended_register_values_;
 
+  // Packet-stream trace for backends (predicated tiling analysis): indirect
+  // buffer calls, bin select changes and draws skipped by the bin check.
+  enum class Pm4TraceEvent { kIndirectBuffer, kBinSelect, kPredicatedSkip };
+  virtual void OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {}
+
   uint64_t bin_select_ = 0xFFFFFFFFull;
   uint64_t bin_mask_ = 0xFFFFFFFFull;
 

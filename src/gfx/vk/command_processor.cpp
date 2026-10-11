@@ -783,6 +783,22 @@ bool VulkanCommandProcessor::SetupContext() {
   const VkDevice device = vulkan_device->device();
   const ui::vulkan::VulkanDevice::Properties& device_properties = vulkan_device->properties();
 
+  {
+    VkPhysicalDeviceProperties physical_properties;
+    vulkan_device->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(
+        vulkan_device->physical_device(), &physical_properties);
+    if (physical_properties.limits.timestampComputeAndGraphics) {
+      fh2_timestamp_period_ns_ = physical_properties.limits.timestampPeriod;
+      VkQueryPoolCreateInfo query_pool_info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+      query_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      query_pool_info.queryCount = kFh2TimestampSlots * 2;
+      if (dfn.vkCreateQueryPool(device, &query_pool_info, nullptr, &fh2_timestamp_pool_) !=
+          VK_SUCCESS) {
+        fh2_timestamp_pool_ = VK_NULL_HANDLE;
+      }
+    }
+  }
+
   // The unconditional inclusion of the vertex shader stage also covers the case
   // of manual index / factor buffer fetch (the system constants and the shared
   // memory are needed for that) in the tessellation vertex shader when
@@ -1908,6 +1924,11 @@ void VulkanCommandProcessor::ShutdownContext() {
   const VkDevice device = vulkan_device->device();
 
   DestroyScratchBuffer();
+
+  if (fh2_timestamp_pool_) {
+    dfn.vkDestroyQueryPool(device, fh2_timestamp_pool_, nullptr);
+    fh2_timestamp_pool_ = VK_NULL_HANDLE;
+  }
 
   for (auto& readback_pair : readback_buffers_) {
     ReadbackBuffer& readback = readback_pair.second;
@@ -4955,6 +4976,39 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
   sample_counts->StencilFail_B = 0;
 }
 
+void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
+  switch (event) {
+    case Pm4TraceEvent::kIndirectBuffer:
+      fh2::rtlog::Log("IB {:08X} len {:X}", a, b);
+      break;
+    case Pm4TraceEvent::kBinSelect:
+      fh2::rtlog::Log("BIN_SELECT {:08X}{:08X}", b, a);
+      break;
+    case Pm4TraceEvent::kPredicatedSkip:
+      ++fh2::rtlog::g_counters.predicated_skips;
+      break;
+  }
+}
+
+void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
+                                                  uint64_t to_submission) {
+  if (!fh2_timestamp_pool_) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  for (uint64_t submission = from_submission; submission <= to_submission; ++submission) {
+    uint64_t times[2];
+    uint32_t slot = uint32_t(submission % kFh2TimestampSlots) * 2;
+    if (dfn.vkGetQueryPoolResults(vulkan_device->device(), fh2_timestamp_pool_, slot, 2,
+                                  sizeof(times), times, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
+        times[1] >= times[0]) {
+      fh2::rtlog::g_counters.gpu_ns += uint64_t(double(times[1] - times[0]) * fh2_timestamp_period_ns_);
+    }
+  }
+}
+
 void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
   // Only report once, no need to retry a wait that won't succeed anyway.
   if (device_lost_) {
@@ -5026,6 +5080,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
                       submissions_in_flight_fences_awaited_end);
   submissions_in_flight_fences_.erase(submissions_in_flight_fences_.cbegin(),
                                       submissions_in_flight_fences_awaited_end);
+  Fh2CollectTimestamps(submission_completed_ + 1, submission_completed_ + fences_awaited);
   submission_completed_ += fences_awaited;
 
   // Reclaim semaphores.
@@ -5399,7 +5454,17 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
       return false;
     }
+    uint32_t fh2_slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots) * 2;
+    if (fh2_timestamp_pool_) {
+      dfn.vkCmdResetQueryPool(command_buffer.buffer, fh2_timestamp_pool_, fh2_slot, 2);
+      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              fh2_timestamp_pool_, fh2_slot);
+    }
     deferred_command_buffer_.Execute(command_buffer.buffer);
+    if (fh2_timestamp_pool_) {
+      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                              fh2_timestamp_pool_, fh2_slot + 1);
+    }
     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
       REXGPU_ERROR("Failed to end a Vulkan command buffer");
       return false;

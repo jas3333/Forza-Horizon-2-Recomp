@@ -832,6 +832,9 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
   if (packet & 1) {
     bool any_pass = (bin_select_ & bin_mask_) != 0;
     if (!any_pass || opcode == PM4_XE_SWAP) {
+      if (opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2) {
+        OnPm4Trace(Pm4TraceEvent::kPredicatedSkip, uint32_t(bin_mask_), uint32_t(bin_select_));
+      }
       reader->AdvanceRead(count * sizeof(uint32_t));
       return true;
     }
@@ -927,12 +930,16 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       uint32_t value = reader->ReadAndSwap<uint32_t>();
       bin_select_ = (bin_select_ & 0xFFFFFFFF00000000ull) | value;
       result = true;
-    } break;
+      OnPm4Trace(Pm4TraceEvent::kBinSelect, uint32_t(bin_select_), uint32_t(bin_select_ >> 32));
+    }
+      break;
     case PM4_SET_BIN_SELECT_HI: {
       uint32_t value = reader->ReadAndSwap<uint32_t>();
       bin_select_ = (bin_select_ & 0xFFFFFFFFull) | (static_cast<uint64_t>(value) << 32);
       result = true;
-    } break;
+      OnPm4Trace(Pm4TraceEvent::kBinSelect, uint32_t(bin_select_), uint32_t(bin_select_ >> 32));
+    }
+      break;
     case PM4_SET_BIN_MASK: {
       assert_true(count == 2);
       uint64_t val_hi = reader->ReadAndSwap<uint32_t>();
@@ -946,7 +953,9 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
       uint64_t val_lo = reader->ReadAndSwap<uint32_t>();
       bin_select_ = (val_hi << 32) | val_lo;
       result = true;
-    } break;
+      OnPm4Trace(Pm4TraceEvent::kBinSelect, uint32_t(bin_select_), uint32_t(bin_select_ >> 32));
+    }
+      break;
     case PM4_CONTEXT_UPDATE: {
       assert_true(count == 1);
       uint32_t value = reader->ReadAndSwap<uint32_t>();
@@ -1080,6 +1089,7 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
   uint32_t list_length = reader->ReadAndSwap<uint32_t>();
   assert_zero(list_length & ~0xFFFFF);
   list_length &= 0xFFFFF;
+  OnPm4Trace(Pm4TraceEvent::kIndirectBuffer, list_ptr, list_length);
   ExecuteIndirectBuffer(GpuToCpu(list_ptr), list_length);
   return true;
 }

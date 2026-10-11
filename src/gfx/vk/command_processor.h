@@ -523,6 +523,13 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   bool submission_open_ = false;
   uint64_t submission_completed_ = 0;
+
+  // FH2: GPU time of every submission (start/end timestamps), for [RTSTAT].
+  static constexpr uint32_t kFh2TimestampSlots = 64;
+  VkQueryPool fh2_timestamp_pool_ = VK_NULL_HANDLE;
+  double fh2_timestamp_period_ns_ = 1.0;
+  void OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) override;
+  void Fh2CollectTimestamps(uint64_t from_submission, uint64_t to_submission);
   // In case vkQueueSubmit fails after something like a successful
   // vkQueueBindSparse, to wait correctly on the next attempt.
   std::vector<VkSemaphore> current_submission_wait_semaphores_;

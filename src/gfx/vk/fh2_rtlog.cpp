@@ -90,13 +90,14 @@ void OnSwap() {
     REXGPU_INFO(
         "[RTSTAT] per frame: draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
-        "({:.2f} MB, {:.1f} of resolve output)",
+        "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}",
         per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
         per(c.resolve_bytes, l.resolve_bytes) / 1e6, per(c.resolve_clears, l.resolve_clears),
         per(c.dumps, l.dumps), per(c.tex_loads, l.tex_loads),
         per(c.tex_load_bytes, l.tex_load_bytes) / 1e6,
-        per(c.tex_loads_resolved, l.tex_loads_resolved));
+        per(c.tex_loads_resolved, l.tex_loads_resolved), per(c.gpu_ns, l.gpu_ns) / 1e6,
+        per(c.predicated_skips, l.predicated_skips));
     g_last_report = c;
   }
 }
