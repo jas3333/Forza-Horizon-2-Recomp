@@ -2,11 +2,16 @@
 
 #include <rex/graphics/command_processor.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
+
+namespace rex::graphics {
+extern std::atomic<uint64_t> g_shared_memory_upload_bytes;
+}  // namespace rex::graphics
 
 namespace fh2::rtlog {
 
@@ -187,7 +192,7 @@ namespace {
 // happened during it.
 constexpr double kSpikeMs = 25.0;
 Counters g_frame_start_counters;
-uint64_t g_frame_start_idle_ns = 0, g_frame_start_wait_ns = 0;
+uint64_t g_frame_start_idle_ns = 0, g_frame_start_wait_ns = 0, g_frame_start_upload = 0;
 std::chrono::steady_clock::time_point g_last_swap;
 }  // namespace
 
@@ -197,6 +202,7 @@ void OnSwap() {
     uint64_t idle_ns = rex::graphics::g_command_processor_idle_ns.load(std::memory_order_relaxed);
     uint64_t wait_ns =
         rex::graphics::g_command_processor_wait_reg_mem_ns.load(std::memory_order_relaxed);
+    uint64_t upload = rex::graphics::g_shared_memory_upload_bytes.load(std::memory_order_relaxed);
     if (g_frame > 300) {
       double frame_ms = std::chrono::duration<double, std::milli>(now - g_last_swap).count();
       if (frame_ms > kSpikeMs) {
@@ -206,7 +212,7 @@ void OnSwap() {
             "[SPIKE] frame {}: {:.1f} ms -- command thread idle {:.1f} ms, WAIT_REG_MEM {:.1f} ms; "
             "draws {}, texture loads {} ({:.2f} MB), resolves {}, transfers {}, new shaders {}, "
             "new pipelines {}, GPU (completed) {:.1f} ms, blocking WAIT_REG_MEMs {}, fence waits "
-            "{:.1f} ms",
+            "{:.1f} ms, uploads {:.2f} MB",
             g_frame, frame_ms, double(idle_ns - g_frame_start_idle_ns) / 1e6,
             double(wait_ns - g_frame_start_wait_ns) / 1e6, c.draws - s.draws,
             c.tex_loads - s.tex_loads, double(c.tex_load_bytes - s.tex_load_bytes) / 1e6,
@@ -214,13 +220,15 @@ void OnSwap() {
             c.shaders_translated - s.shaders_translated,
             c.pipelines_created - s.pipelines_created, double(c.gpu_ns - s.gpu_ns) / 1e6,
             c.wait_reg_mem_blocks - s.wait_reg_mem_blocks,
-            double(c.fence_wait_ns - s.fence_wait_ns) / 1e6);
+            double(c.fence_wait_ns - s.fence_wait_ns) / 1e6,
+            double(upload - g_frame_start_upload) / 1e6);
       }
     }
     g_last_swap = now;
     g_frame_start_counters = g_counters;
     g_frame_start_idle_ns = idle_ns;
     g_frame_start_wait_ns = wait_ns;
+    g_frame_start_upload = upload;
   }
   if (g_frame++ == 0) g_start = now;
   double seconds = std::chrono::duration<double>(now - g_start).count();

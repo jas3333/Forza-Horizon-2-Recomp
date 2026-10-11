@@ -36,6 +36,8 @@
 #include "command_processor.h"
 
 #include "fh2_rtlog.h"
+
+#include <xxhash.h>
 #include "pipeline_cache.h"
 #include "render_target_cache.h"
 #include "shader.h"
@@ -4163,6 +4165,53 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
       render_target_cache_->last_update_framebuffer());
+
+  // FH2 frame log: a fingerprint of the draw's content (shaders, geometry,
+  // used constants, textures) to measure duplicates across predicated-tiling
+  // strips.
+  if (fh2::rtlog::g_active) {
+    const RegisterFile& fp_regs = *register_file_;
+    XXH3_state_t* fp_state = XXH3_createState();
+    XXH3_64bits_reset(fp_state);
+    uint64_t shader_hashes[2] = {vertex_shader->ucode_data_hash(),
+                                 pixel_shader ? pixel_shader->ucode_data_hash() : 0};
+    XXH3_64bits_update(fp_state, shader_hashes, sizeof(shader_hashes));
+    uint32_t geometry[4] = {index_count, uint32_t(prim_type),
+                            index_buffer_info ? index_buffer_info->guest_base : 0,
+                            fp_regs[XE_GPU_REG_VGT_INDX_OFFSET]};
+    XXH3_64bits_update(fp_state, geometry, sizeof(geometry));
+    for (const auto& binding : vertex_shader->vertex_bindings()) {
+      const uint32_t* fetch =
+          &fp_regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 2];
+      XXH3_64bits_update(fp_state, fetch, sizeof(uint32_t) * 2);
+    }
+    for (const Shader* stage_shader : {static_cast<const Shader*>(vertex_shader),
+                                       static_cast<const Shader*>(pixel_shader)}) {
+      if (!stage_shader) continue;
+      for (const auto& binding : stage_shader->texture_bindings()) {
+        const uint32_t* fetch =
+            &fp_regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6];
+        XXH3_64bits_update(fp_state, fetch, sizeof(uint32_t) * 6);
+      }
+    }
+    for (uint32_t stage = 0; stage < 2; ++stage) {
+      const uint64_t* map =
+          stage ? current_float_constant_map_pixel_ : current_float_constant_map_vertex_;
+      for (uint32_t word = 0; word < 4; ++word) {
+        uint64_t bits = map[word];
+        while (bits) {
+          uint32_t bit = uint32_t(__builtin_ctzll(bits));
+          bits &= bits - 1;
+          uint32_t constant = stage * 256 + word * 64 + bit;
+          XXH3_64bits_update(fp_state,
+                             &fp_regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + constant * 4],
+                             sizeof(uint32_t) * 4);
+        }
+      }
+    }
+    fh2::rtlog::Log("D {:016X} m{:X}", XXH3_64bits_digest(fp_state), uint32_t(bin_mask_));
+    XXH3_freeState(fp_state);
+  }
 
   // Draw.
   if (primitive_processing_result.index_buffer_type ==
