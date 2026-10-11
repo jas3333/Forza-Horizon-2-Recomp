@@ -98,6 +98,10 @@ X_STATUS Runtime::Setup(RuntimeConfig config) {
     return X_STATUS_UNSUCCESSFUL;
   }
   instance_ = this;
+  // No-op unless built with REXGLUE_ENABLE_PROFILING (REXGLUE_PROFILE_RELEASE
+  // for Release). Tracy is on-demand: zones cost almost nothing until a
+  // profiler (tracy-capture or the GUI) connects.
+  rex::perf::Profiler::Startup();
 
   auto fail = [this](X_STATUS status, std::string_view reason) {
     REXSYS_ERROR("Runtime::Setup failed: {}", reason);

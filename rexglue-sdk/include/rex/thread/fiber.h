@@ -59,6 +59,9 @@ struct Fiber {
   std::exception_ptr exception_;
   Fiber* return_fiber_ = nullptr;
   bool finished_ = false;
+  // Stable name for Tracy's fiber tracking (TracyFiberEnter needs a pointer
+  // that stays valid); null for a converted thread.
+  const char* profile_name_ = nullptr;
 
 #if REX_PLATFORM_WIN32
   void* handle_ = nullptr;

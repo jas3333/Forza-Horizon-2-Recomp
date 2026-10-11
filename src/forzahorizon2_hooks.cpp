@@ -953,3 +953,34 @@ struct RenderDocAutoCapture {
   }
 } g_renderdoc_auto_capture;
 }  // namespace
+
+// Profiling: the D3D ring-buffer space wait (spins on the CP read pointer).
+// Shows up as "guest:ring_space_wait" in Tracy captures.
+#include <rex/dbg.h>
+extern "C" void __imp__sub_82B72A90(PPCContext& ctx, uint8_t* base);
+extern "C" REX_FUNC(sub_82B72A90) {
+#ifdef REXGLUE_ENABLE_PROFILING
+  // The game calls this in a tight loop (~500k/s), far too often for a zone
+  // per call. Accumulate the time and plot the share of each 100 ms spent
+  // here ("guest_ring_wait_pct" in Tracy).
+  static std::atomic<int64_t> spent_ns{0};
+  static std::atomic<int64_t> window_start_ns{0};
+  auto now = [] {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  int64_t t0 = now();
+  __imp__sub_82B72A90(ctx, base);
+  int64_t t1 = now();
+  spent_ns += t1 - t0;
+  int64_t ws = window_start_ns.load();
+  if (ws == 0) {
+    window_start_ns.compare_exchange_strong(ws, t1);
+  } else if (t1 - ws >= 100000000 && window_start_ns.compare_exchange_strong(ws, t1)) {
+    TracyPlot("guest_ring_wait_pct", double(spent_ns.exchange(0)) * 100.0 / double(t1 - ws));
+  }
+#else
+  __imp__sub_82B72A90(ctx, base);
+#endif
+}

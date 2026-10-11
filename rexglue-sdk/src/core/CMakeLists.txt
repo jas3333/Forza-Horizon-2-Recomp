@@ -125,9 +125,9 @@ endif()
 
 if(REXGLUE_ENABLE_TRACY)
     target_link_libraries(rexcore PUBLIC
-        $<$<NOT:$<CONFIG:Release>>:$<TARGET_NAME:TracyClient>>)
+        $<${REXGLUE_PROFILING_CONFIG_GENEX}:$<TARGET_NAME:TracyClient>>)
     target_compile_definitions(rexcore PUBLIC
-        $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
+        $<${REXGLUE_PROFILING_CONFIG_GENEX}:REXGLUE_ENABLE_PROFILING>)
 endif()
 
 if(REXGLUE_ENABLE_PERF_COUNTERS)

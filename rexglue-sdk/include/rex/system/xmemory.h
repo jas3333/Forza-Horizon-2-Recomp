@@ -252,7 +252,7 @@ class BaseHeap {
   //
   // Returns an empty (unlocked) guard when guest pages are at least host page
   // sized, since no reconcile happens then and the lock would be pure cost.
-  virtual std::unique_lock<std::recursive_mutex> AcquireHostPageReconcileLock() const;
+  virtual std::unique_lock<rex::thread::global_mutex_type> AcquireHostPageReconcileLock() const;
 
   // Whether a host page is currently write-watched for guest invalidation.
   // SyncHostPageAccess must not restore write access to such a page: the watch
@@ -322,7 +322,7 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications, bool enable_data_providers);
   // Returns true if any page in the range was watched.
-  bool TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+  bool TriggerCallbacks(std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once,
                         uint32_t virtual_address, uint32_t length, bool is_write,
                         bool unwatch_exact_range, bool unprotect = true);
 
@@ -335,7 +335,7 @@ class PhysicalHeap : public BaseHeap {
   // pass takes the global critical region. Acquire whenever this heap or its
   // parent will need it, so the ordering holds even for a heap whose own guest
   // pages are large enough to skip reconciling but whose parent's are not.
-  std::unique_lock<std::recursive_mutex> AcquireHostPageReconcileLock() const override;
+  std::unique_lock<rex::thread::global_mutex_type> AcquireHostPageReconcileLock() const override;
 
   VirtualHeap* parent_heap_;
 
@@ -513,7 +513,7 @@ class Memory {
   // TODO(Triang3l): Implement data providers - this is why locking depth of 1
   // will be required in the future.
   bool TriggerPhysicalMemoryCallbacks(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once, uint32_t virtual_address,
+      std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once, uint32_t virtual_address,
       uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect = true);
 
   // Allocates virtual memory from the 'system' heap.
@@ -572,10 +572,10 @@ class Memory {
 
   static uint32_t HostToGuestVirtualThunk(const void* context, const void* host_address);
 
-  bool AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+  bool AccessViolationCallback(std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once,
                                void* host_address, bool is_write);
   static bool AccessViolationCallbackThunk(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
+      std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once, void* context,
       void* host_address, bool is_write);
 
   std::filesystem::path file_name_;

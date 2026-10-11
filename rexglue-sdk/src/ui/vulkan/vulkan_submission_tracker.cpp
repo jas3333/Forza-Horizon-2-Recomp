@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/dbg.h>
 #include <cstdint>
 
 #include <rex/assert.h>
@@ -89,6 +90,7 @@ uint64_t VulkanSubmissionTracker::UpdateAndGetCompletedSubmission() {
 }
 
 bool VulkanSubmissionTracker::AwaitSubmissionCompletion(uint64_t submission_index) {
+  SCOPE_profile_zone("present:AwaitSubmission");
   // The tracker itself can't give a submission index for a submission that
   // hasn't even started being recorded yet, the client has provided a
   // completely invalid value or has done overly optimistic math if such an

@@ -243,6 +243,7 @@ void CommandProcessor::WorkerThreadMain() {
     uint32_t write_ptr_index = write_ptr_index_.load();
     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
       SCOPE_profile_cpu_i("gpu", "rex::graphics::CommandProcessor::Stall");
+      SCOPE_profile_zone("gpu:idle_wait_for_commands");
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
@@ -688,6 +689,7 @@ void CommandProcessor::PrepareForWait() {}
 void CommandProcessor::ReturnFromWait() {}
 
 uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t write_index) {
+  SCOPE_profile_zone("gpu:ExecutePrimaryBuffer");
   SCOPE_profile_cpu_f("gpu");
 
   // Execute commands!
@@ -1073,6 +1075,7 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
 
 bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet,
                                                        uint32_t count) {
+  SCOPE_profile_zone("gpu:WAIT_REG_MEM");
   SCOPE_profile_cpu_f("gpu");
 
   // wait until a register or memory location is a specific value

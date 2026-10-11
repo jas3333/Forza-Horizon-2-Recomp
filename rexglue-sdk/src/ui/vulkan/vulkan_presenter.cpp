@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <rex/dbg.h>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -1529,6 +1530,7 @@ bool VulkanPresenter::GuestOutputImage::Initialize() {
 }
 
 Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_drawers) {
+  SCOPE_profile_zone("present:PaintAndPresent");
   // Begin the submission in place of the one not currently potentially used on
   // the GPU.
   uint64_t current_paint_submission_index =
@@ -1840,6 +1842,15 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                 swapchain_effect, paint_context_.swapchain_render_pass);
             if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
               guest_output_flow.effect_count = 0;
+            } else {
+              // Record the format the pipeline was made for. This was never
+              // assigned (here or upstream), so the check above saw
+              // VK_FORMAT_UNDEFINED != the swapchain format on every frame:
+              // the presenter waited for its last submission, destroyed the
+              // pipeline and compiled it again, every frame (29% of the UI
+              // thread, plus a CPU/GPU sync per frame).
+              swapchain_effect_pipeline.swapchain_format =
+                  paint_context_.swapchain_render_pass_format;
             }
           }
         }

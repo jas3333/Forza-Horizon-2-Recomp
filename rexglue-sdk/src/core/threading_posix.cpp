@@ -13,6 +13,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 #include <signal.h>
 
+#include <algorithm>
 #include <atomic>
 #include <array>
 #include <cerrno>
@@ -271,35 +272,36 @@ static sem_t* RexCreateAnonymousSemaphore() {
 }
 #endif  // __APPLE__
 
-// A multi-object wait blocks on this counter instead of polling (port of
-// Xenia 6435e7990). Every signal bumps it and, on Linux, wakes the waiters
-// with a futex. Neither side takes a lock, so signalling stays safe from a
-// user callback running in a signal handler. With no multi-object wait in
-// progress, signalling is one load.
-std::atomic<uint32_t> multi_wait_epoch{0};
-std::atomic<uint32_t> multi_wait_waiters{0};
+// A multi-object wait registers a waiter with every handle it waits on and
+// blocks on the waiter's own counter. A signal bumps and wakes only the
+// waiters registered on that handle. (Xenia 6435e7990 used one global
+// counter, which woke every multi-object waiter in the process on every
+// signal: ~8000 wakeups/s per waiting thread in FH2, each re-checking its
+// handles.) Registration and notification happen under the handle's mutex_,
+// which every signalling path already holds.
+struct MultiObjectWaiter {
+  std::atomic<uint32_t> epoch{0};
+};
 
-void NotifyMultiObjectWaiters() {
-  if (multi_wait_waiters.load(std::memory_order_seq_cst) == 0) {
-    return;
-  }
-  multi_wait_epoch.fetch_add(1, std::memory_order_seq_cst);
+void WakeMultiObjectWaiter(MultiObjectWaiter* waiter) {
+  waiter->epoch.fetch_add(1, std::memory_order_seq_cst);
 #if REX_PLATFORM_LINUX
-  syscall(SYS_futex, reinterpret_cast<uint32_t*>(&multi_wait_epoch), FUTEX_WAKE_PRIVATE, INT_MAX,
-          nullptr, nullptr, 0);
+  syscall(SYS_futex, reinterpret_cast<uint32_t*>(&waiter->epoch), FUTEX_WAKE_PRIVATE, 1, nullptr,
+          nullptr, 0);
 #endif
 }
 
-// Blocks until the epoch differs from `expected` or `timeout` passes.
-void WaitForMultiObjectSignal(uint32_t expected, std::chrono::milliseconds timeout) {
+// Blocks until the waiter's epoch differs from `expected` or `timeout` passes.
+void WaitForMultiObjectSignal(MultiObjectWaiter* waiter, uint32_t expected,
+                              std::chrono::milliseconds timeout) {
 #if REX_PLATFORM_LINUX
   timespec ts{};
   ts.tv_sec = static_cast<time_t>(timeout.count() / 1000);
   ts.tv_nsec = static_cast<long>((timeout.count() % 1000) * 1000000);
-  syscall(SYS_futex, reinterpret_cast<uint32_t*>(&multi_wait_epoch), FUTEX_WAIT_PRIVATE, expected,
+  syscall(SYS_futex, reinterpret_cast<uint32_t*>(&waiter->epoch), FUTEX_WAIT_PRIVATE, expected,
           &ts, nullptr, 0);
 #else
-  if (multi_wait_epoch.load(std::memory_order_seq_cst) == expected) {
+  if (waiter->epoch.load(std::memory_order_seq_cst) == expected) {
     std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(1)));
   }
 #endif
@@ -324,6 +326,14 @@ class PosixConditionBase {
 
   virtual ~PosixConditionBase() = default;
   virtual bool Signal() = 0;
+
+  // Wakes the multi-object waiters registered on this handle. Call with
+  // mutex_ held.
+  void NotifyMultiObjectWaitersLocked() {
+    for (MultiObjectWaiter* waiter : multi_object_waiters_) {
+      WakeMultiObjectWaiter(waiter);
+    }
+  }
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
     bool executed;
@@ -374,14 +384,30 @@ class PosixConditionBase {
                         : start_time + timeout;
 
     // Registered before the first check, so a later signal bumps the epoch.
-    multi_wait_waiters.fetch_add(1, std::memory_order_seq_cst);
+    MultiObjectWaiter waiter;
+    for (PosixConditionBase* handle : handles) {
+      std::lock_guard<std::mutex> registration_lock(handle->mutex_);
+      handle->multi_object_waiters_.push_back(&waiter);
+    }
     struct MultiWaitRegistration {
-      ~MultiWaitRegistration() { multi_wait_waiters.fetch_sub(1, std::memory_order_seq_cst); }
-    } multi_wait_registration;
+      std::vector<PosixConditionBase*>& handles;
+      MultiObjectWaiter* waiter;
+      ~MultiWaitRegistration() {
+        for (PosixConditionBase* handle : handles) {
+          std::lock_guard<std::mutex> registration_lock(handle->mutex_);
+          auto& list = handle->multi_object_waiters_;
+          auto it = std::find(list.begin(), list.end(), waiter);
+          if (it != list.end()) {
+            *it = list.back();
+            list.pop_back();
+          }
+        }
+      }
+    } multi_wait_registration{handles, &waiter};
     while (true) {
       // A signal while the handles are read changes the epoch, and the wait
       // below then returns at once.
-      uint32_t epoch_before_check = multi_wait_epoch.load(std::memory_order_seq_cst);
+      uint32_t epoch_before_check = waiter.epoch.load(std::memory_order_seq_cst);
 
       size_t first_signaled = std::numeric_limits<size_t>::max();
       bool condition_met = false;
@@ -466,7 +492,7 @@ class PosixConditionBase {
       if (remaining <= std::chrono::milliseconds::zero()) {
         remaining = std::chrono::milliseconds(1);
       }
-      WaitForMultiObjectSignal(epoch_before_check,
+      WaitForMultiObjectSignal(&waiter, epoch_before_check,
                                std::min(remaining, std::chrono::milliseconds(50)));
     }
   }
@@ -480,6 +506,8 @@ class PosixConditionBase {
   inline virtual void post_execution() = 0;
   std::condition_variable cond_;
   std::mutex mutex_;
+  // Multi-object waiters currently registered on this handle (under mutex_).
+  std::vector<MultiObjectWaiter*> multi_object_waiters_;
 };
 
 // There really is no native POSIX handle for a single wait/signal construct
@@ -500,7 +528,7 @@ class PosixCondition<Event> : public PosixConditionBase {
     auto lock = std::unique_lock<std::mutex>(mutex_);
     signal_ = true;
     cond_.notify_all();
-    NotifyMultiObjectWaiters();
+    NotifyMultiObjectWaitersLocked();
     return true;
   }
 
@@ -538,7 +566,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
     }
     count_ += release_count;
     cond_.notify_all();
-    NotifyMultiObjectWaiters();
+    NotifyMultiObjectWaitersLocked();
     return true;
   }
 
@@ -547,7 +575,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
   inline void post_execution() override {
     count_--;
     cond_.notify_all();
-    NotifyMultiObjectWaiters();
+    NotifyMultiObjectWaitersLocked();
   }
   uint32_t count_;
   const uint32_t maximum_count_;
@@ -572,7 +600,7 @@ class PosixCondition<Mutant> : public PosixConditionBase {
       // Free to be acquired by another thread
       if (count_ == 0) {
         cond_.notify_all();
-        NotifyMultiObjectWaiters();
+        NotifyMultiObjectWaitersLocked();
       }
       return true;
     }
@@ -605,7 +633,7 @@ class PosixCondition<Timer> : public PosixConditionBase {
     std::lock_guard<std::mutex> lock(mutex_);
     signal_ = true;
     cond_.notify_all();
-    NotifyMultiObjectWaiters();
+    NotifyMultiObjectWaitersLocked();
     return true;
   }
 
@@ -983,7 +1011,6 @@ class PosixCondition<Thread> : public PosixConditionBase {
       sem_post(suspend_sem_ptr());
     }
     state_signal_.notify_all();
-    NotifyMultiObjectWaiters();
     return true;
   }
 
@@ -1035,7 +1062,7 @@ class PosixCondition<Thread> : public PosixConditionBase {
       exit_code_ = exit_code;
       signaled_ = true;
       cond_.notify_all();
-      NotifyMultiObjectWaiters();
+      NotifyMultiObjectWaitersLocked();
     }
     if (is_current_thread) {
       pthread_exit(reinterpret_cast<void*>(exit_code));
@@ -1486,7 +1513,6 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
       thread->handle_.suspend_count_ = 1;
     }
     thread->handle_.state_signal_.notify_all();
-    NotifyMultiObjectWaiters();
   }
 
   if (create_suspended) {
@@ -1507,7 +1533,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     thread->handle_.exit_code_ = 0;
     thread->handle_.signaled_ = true;
     thread->handle_.cond_.notify_all();
-    NotifyMultiObjectWaiters();
+    thread->handle_.NotifyMultiObjectWaitersLocked();
   }
 
   current_thread_ = nullptr;

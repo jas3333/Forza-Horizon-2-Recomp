@@ -25,8 +25,42 @@
 #include <cstdlib>
 #include <ucontext.h>
 #include <utility>
+#ifdef REXGLUE_ENABLE_PROFILING
+#include <atomic>
+#include <string>
+#include <tracy/Tracy.hpp>
+#endif
 
 namespace rex::thread {
+
+namespace {
+// Tells Tracy which fiber is now executing on this thread. Guest fibers
+// swap host stacks under Tracy's per-thread zone stack; without this a zone
+// opened on one fiber and closed after a switch corrupted it, and attaching
+// tracy-capture killed the game.
+void ProfilerOnFiberResumed(const char* profile_name) {
+#ifdef REXGLUE_ENABLE_PROFILING
+  if (!TracyIsStarted) return;
+  if (profile_name) {
+    TracyFiberEnter(profile_name);
+  } else {
+    TracyFiberLeave;
+  }
+#else
+  (void)profile_name;
+#endif
+}
+
+const char* MakeFiberProfileName() {
+#ifdef REXGLUE_ENABLE_PROFILING
+  static std::atomic<uint32_t> next{0};
+  // Leaked on purpose: Tracy keeps the pointer for the whole session.
+  return (new std::string("fiber " + std::to_string(next.fetch_add(1))))->c_str();
+#else
+  return nullptr;
+#endif
+}
+}  // namespace
 
 thread_local Fiber* Fiber::tls_current_ = nullptr;
 
@@ -45,6 +79,7 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
   auto* f = new Fiber();
   f->entry_ = entry;
   f->arg_ = arg;
+  f->profile_name_ = MakeFiberProfileName();
   f->stack_.resize(stack_size);
 
   if (getcontext(&f->context_) == -1) {
@@ -62,6 +97,7 @@ Fiber* Fiber::Create(size_t stack_size, void (*entry)(void*), void* arg) {
 /*static*/ void Fiber::Trampoline() {
   // tls_current_ was updated by SwitchTo before swapcontext returned here.
   Fiber* f = tls_current_;
+  ProfilerOnFiberResumed(f->profile_name_);
   try {
     f->entry_(f->arg_);
   } catch (...) {
@@ -83,6 +119,8 @@ void Fiber::SwitchTo(Fiber* target) {
   target->return_fiber_ = from;
   tls_current_ = target;
   swapcontext(&from->context_, &target->context_);
+  // Back on `from` (someone switched to it).
+  ProfilerOnFiberResumed(from->is_thread_fiber_ ? nullptr : from->profile_name_);
 
   if (target->exception_) {
     auto exception = std::exchange(target->exception_, {});

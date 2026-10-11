@@ -814,6 +814,7 @@ void XThread::Execute() {
 
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
+  rex::perf::Profiler::ThreadEnter(thread_name_.c_str());
 
   // Dispatch any APCs that were queued before the thread was created first.
   DeliverAPCs();
@@ -1710,6 +1711,7 @@ void XHostThread::Execute() {
 
   // Let the kernel know we are starting.
   kernel_state_->OnThreadExecute(this);
+  rex::perf::Profiler::ThreadEnter(thread_name_.c_str());
 
   int ret = host_fn_();
 

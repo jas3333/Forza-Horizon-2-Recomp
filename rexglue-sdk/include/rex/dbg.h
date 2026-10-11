@@ -49,6 +49,10 @@ void DebugPrint(fmt::string_view format, const Args&... args) {
 
 // CPU profiling zones
 #define SCOPE_profile_cpu_f(name) ZoneNamedN(___tracy_cpu_zone, name, TracyIsStarted)
+// Named zone with a line-unique variable, so it can share a scope with
+// another zone (SCOPE_profile_cpu_f always declares ___tracy_cpu_zone).
+#define SCOPE_profile_zone(name) \
+  ZoneNamedN(TracyConcat(___tracy_zone_, TracyLine), name, TracyIsStarted)
 #define SCOPE_profile_cpu_i(name, detail)                \
   ZoneNamedN(___tracy_cpu_zone_i, name, TracyIsStarted); \
   ZoneTextV(___tracy_cpu_zone_i, detail, std::strlen(detail))
@@ -93,6 +97,7 @@ void DebugPrint(fmt::string_view format, const Args&... args) {
 
 // CPU profiling stubs
 #define SCOPE_profile_cpu_f(name)
+#define SCOPE_profile_zone(name)
 #define SCOPE_profile_cpu_i(name, detail)
 
 // GPU profiling stubs

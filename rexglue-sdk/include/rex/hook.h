@@ -42,9 +42,16 @@
 // unless explicitly enabled.
 #ifdef REXGLUE_ENABLE_PROFILING
 #include <tracy/Tracy.hpp>
+#ifdef REXGLUE_PROFILE_EXPORTS
+#define REX_PROFILE_EXPORTS_ACTIVE TracyIsStarted
+#else
+#define REX_PROFILE_EXPORTS_ACTIVE false
+#endif
 #define REX_HOOK(subroutine, function)                                                  \
   extern "C" REX_FUNC(subroutine) {                                                     \
-    ZoneNamedN(___tracy_hook_zone, #subroutine, TracyIsStarted);                        \
+    /* Per-export zones are opt-in (REXGLUE_PROFILE_EXPORTS): critical-section */      \
+    /* exports alone run ~1M/s and flooded Tracy until captures stalled. */           \
+    ZoneNamedN(___tracy_hook_zone, #subroutine, REX_PROFILE_EXPORTS_ACTIVE);            \
     if (REXCVAR_GET(calltrace_kernel_calls)) {                                          \
       ctx.call_trace[ctx.call_trace_index & (PPCContext::kCallTraceCapacity - 1)].name = \
           #subroutine;                                                                  \

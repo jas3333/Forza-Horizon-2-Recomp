@@ -395,6 +395,13 @@ if(REXGLUE_ENABLE_TRACY)
             TRACY_IMPORTS
             TRACY_ENABLE
             TRACY_ON_DEMAND
+            # The runtime handles SIGSEGV itself (guest page faults, MMIO). Tracy's
+            # crash handler took those over on connect and ended the process on
+            # the first routine guest fault. Sampling and system tracing use
+            # signals/perf events of their own; zones are what we need.
+            TRACY_NO_CRASH_HANDLER
+            TRACY_NO_SAMPLING
+            TRACY_NO_SYSTEM_TRACING
             TRACY_DELAYED_INIT
             TRACY_MANUAL_LIFETIME
             TRACY_FIBERS

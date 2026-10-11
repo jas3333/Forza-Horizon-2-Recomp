@@ -98,9 +98,9 @@ if(REXGLUE_ENABLE_TRACY)
     # namespace. Without it the plain name survives into the installed config
     # and consumers link a bare TracyClient they have no search path for.
     target_link_libraries(rexruntime PUBLIC
-        $<$<NOT:$<CONFIG:Release>>:$<TARGET_NAME:TracyClient>>)
+        $<${REXGLUE_PROFILING_CONFIG_GENEX}:$<TARGET_NAME:TracyClient>>)
     target_compile_definitions(rexruntime PUBLIC
-        $<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PROFILING>)
+        $<${REXGLUE_PROFILING_CONFIG_GENEX}:REXGLUE_ENABLE_PROFILING>)
 endif()
 
 if(REXGLUE_ENABLE_PERF_COUNTERS)

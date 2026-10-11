@@ -12,6 +12,7 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <rex/dbg.h>
 #include <algorithm>
 #include <atomic>
 #include <string>
@@ -445,6 +446,7 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                   mapped_u32 frontbuffer_ptr,  // ptr to frontbuffer address
                   mapped_u32 texture_format_ptr, mapped_u32 color_space_ptr, mapped_u32 width,
                   mapped_u32 height) {
+  SCOPE_profile_zone("krnl:VdSwap");
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

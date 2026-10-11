@@ -531,7 +531,7 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
   return mmio_handler_->LookupRange(virtual_address);
 }
 
-bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+bool Memory::AccessViolationCallback(std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once,
                                      void* host_address, bool is_write) {
   // Access via physical_membase_ is special, when need to bypass everything
   // (for instance, for a data provider to actually write the data) so only
@@ -635,14 +635,14 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
 }
 
 bool Memory::AccessViolationCallbackThunk(
-    std::unique_lock<std::recursive_mutex> global_lock_locked_once, void* context,
+    std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once, void* context,
     void* host_address, bool is_write) {
   return reinterpret_cast<memory::Memory*>(context)->AccessViolationCallback(
       std::move(global_lock_locked_once), host_address, is_write);
 }
 
 bool Memory::TriggerPhysicalMemoryCallbacks(
-    std::unique_lock<std::recursive_mutex> global_lock_locked_once, uint32_t virtual_address,
+    std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect) {
   BaseHeap* heap = LookupHeap(virtual_address);
   if (!heap) {
@@ -907,7 +907,7 @@ BaseHeap::BaseHeap() : membase_(nullptr), heap_base_(0), heap_size_(0), page_siz
 
 BaseHeap::~BaseHeap() = default;
 
-std::unique_lock<std::recursive_mutex> BaseHeap::AcquireHostPageReconcileLock() const {
+std::unique_lock<rex::thread::global_mutex_type> BaseHeap::AcquireHostPageReconcileLock() const {
   if (page_size_ >= memory_->system_page_size_) {
     return {};
   }
@@ -2208,7 +2208,7 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
   }
 }
 
-bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+bool PhysicalHeap::TriggerCallbacks(std::unique_lock<rex::thread::global_mutex_type> global_lock_locked_once,
                                     uint32_t virtual_address, uint32_t length, bool is_write,
                                     bool unwatch_exact_range, bool unprotect) {
   // TODO(Triang3l): Support read watches.
@@ -2365,7 +2365,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
   return true;
 }
 
-std::unique_lock<std::recursive_mutex> PhysicalHeap::AcquireHostPageReconcileLock() const {
+std::unique_lock<rex::thread::global_mutex_type> PhysicalHeap::AcquireHostPageReconcileLock() const {
   auto lock = BaseHeap::AcquireHostPageReconcileLock();
   if (!lock.owns_lock() && parent_heap_ && parent_heap_->page_size() < memory_->system_page_size_) {
     lock = rex::thread::global_critical_region::AcquireDirect();
