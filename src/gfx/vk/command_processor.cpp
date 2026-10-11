@@ -3785,6 +3785,28 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       return true;
     }
   }
+  // FH2 graphics option: motion blur off (FH2_MOTION_BLUR=0, the default).
+  // The final post pass (pixel shader 614588022744BF6B) averages 5 scene taps
+  // along a per-pixel motion vector scaled by c42.x; with c42.x = 0 every tap
+  // is the pixel itself, while bloom, tone mapping and grading stay.
+  struct Fh2ConstantOverride {
+    VulkanCommandProcessor* processor = nullptr;
+    uint32_t index = 0, old_value = 0;
+    ~Fh2ConstantOverride() {
+      if (processor) processor->WriteRegister(index, old_value);
+    }
+  } fh2_motion_blur_override;
+  if (pixel_shader && pixel_shader->ucode_data_hash() == 0x614588022744BF6Bull &&
+      fh2::rtlog::TimedEnvInt("FH2_MOTION_BLUR", 0) == 0) {
+    uint32_t index = XE_GPU_REG_SHADER_CONSTANT_000_X + (256 + 42) * 4;
+    uint32_t old_value = regs[index];
+    if (old_value != 0) {
+      WriteRegister(index, 0);
+      fh2_motion_blur_override.processor = this;
+      fh2_motion_blur_override.index = index;
+      fh2_motion_blur_override.old_value = old_value;
+    }
+  }
   bool memexport_used_pixel = pixel_shader && (pixel_shader->memexport_eM_written() != 0);
   if (memexport_used_pixel) {
     if (!device_properties.fragmentStoresAndAtomics) {
