@@ -6739,6 +6739,21 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   auto dest_format = xenos::TextureFormat(uint32_t(dest.copy_dest_format));
   xenos::ColorRenderTargetFormat rt_format = xenos::ColorRenderTargetFormat(edram.format);
   auto depth_format = xenos::DepthRenderTargetFormat(edram.format);
+  // Experiment (right-edge band bisect): FH2_DIRECT_EXCLUDE bits -- 1 color
+  // from 4x MSAA, 2 full-width (>= 1280) color from 1x, 4 depth, 8 color into
+  // k_8_8_8_8.
+  {
+    int exclude = fh2::rtlog::TimedEnvInt("FH2_DIRECT_EXCLUDE", 0);
+    bool full_width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8 >= 1280;
+    if (exclude &&
+        ((!is_depth && (exclude & 1) && edram.msaa_samples == xenos::MsaaSamples::k4X) ||
+         (!is_depth && (exclude & 2) && full_width &&
+          edram.msaa_samples == xenos::MsaaSamples::k1X) ||
+         (is_depth && (exclude & 4)) ||
+         (!is_depth && (exclude & 8) && dest_format == xenos::TextureFormat::k_8_8_8_8))) {
+      return false;
+    }
+  }
   if (is_depth) {
     // Depth into the matching 24-bit depth texture format only.
     bool depth_float = depth_format == xenos::DepthRenderTargetFormat::kD24FS8;
