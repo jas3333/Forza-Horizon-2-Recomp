@@ -27,6 +27,7 @@
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
+#include "fh2_rtlog.h"
 #include "deferred_command_buffer.h"
 #include "graphics_system.h"
 #include "pipeline_cache.h"
@@ -529,6 +530,31 @@ class VulkanCommandProcessor : public CommandProcessor {
   VkQueryPool fh2_timestamp_pool_ = VK_NULL_HANDLE;
   double fh2_timestamp_period_ns_ = 1.0;
   void OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) override;
+  static constexpr uint32_t kFh2MarksPerSubmission = 2048;
+  VkQueryPool fh2_mark_pool_ = VK_NULL_HANDLE;
+  std::vector<uint8_t> fh2_mark_categories_[kFh2TimestampSlots];
+  fh2::rtlog::GpuCategory fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
+
+ public:
+  // Starts attributing GPU time from this point of the command stream to the
+  // category (no-op if it's already the current one).
+  void Fh2GpuMark(fh2::rtlog::GpuCategory category) {
+    if (category == fh2_current_category_ || !fh2_mark_pool_) {
+      return;
+    }
+    uint32_t slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots);
+    std::vector<uint8_t>& categories = fh2_mark_categories_[slot];
+    if (categories.size() >= kFh2MarksPerSubmission) {
+      return;
+    }
+    deferred_command_buffer_.CmdVkWriteTimestamp(
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fh2_mark_pool_,
+        slot * kFh2MarksPerSubmission + uint32_t(categories.size()));
+    categories.push_back(uint8_t(category));
+    fh2_current_category_ = category;
+  }
+
+ private:
   void Fh2CollectTimestamps(uint64_t from_submission, uint64_t to_submission);
   // In case vkQueueSubmit fails after something like a successful
   // vkQueueBindSparse, to wait correctly on the next attempt.

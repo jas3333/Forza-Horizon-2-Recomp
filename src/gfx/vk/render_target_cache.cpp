@@ -1342,6 +1342,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
                 sizeof(copy_shader_constants), &copy_shader_constants);
           }
           command_processor_.SubmitBarriers(true);
+          command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
 
           // Invalidate textures and mark the range as scaled if needed.
@@ -4655,6 +4656,16 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
 
   bool resolve_clear_needed = render_target_resolve_clear_values && resolve_clear_rectangle;
+  if (resolve_clear_needed) {
+    command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveClear);
+  } else {
+    for (uint32_t i = 0; i < render_target_count; ++i) {
+      if (render_target_transfers && !render_target_transfers[i].empty()) {
+        command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kTransfer);
+        break;
+      }
+    }
+  }
   VkClearRect resolve_clear_rect;
   if (resolve_clear_needed) {
     // Assuming the rectangle is already clamped by the setup function from the
@@ -6126,6 +6137,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     return true;
   }
   ++fh2::rtlog::g_counters.dumps;
+  command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kDump);
 
   // Clear previously set temporary indices.
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {

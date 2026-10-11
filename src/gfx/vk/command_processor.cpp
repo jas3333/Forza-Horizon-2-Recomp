@@ -796,6 +796,12 @@ bool VulkanCommandProcessor::SetupContext() {
           VK_SUCCESS) {
         fh2_timestamp_pool_ = VK_NULL_HANDLE;
       }
+      query_pool_info.queryCount = kFh2TimestampSlots * kFh2MarksPerSubmission;
+      if (!fh2_timestamp_pool_ ||
+          dfn.vkCreateQueryPool(device, &query_pool_info, nullptr, &fh2_mark_pool_) !=
+              VK_SUCCESS) {
+        fh2_mark_pool_ = VK_NULL_HANDLE;
+      }
     }
   }
 
@@ -1929,6 +1935,10 @@ void VulkanCommandProcessor::ShutdownContext() {
     dfn.vkDestroyQueryPool(device, fh2_timestamp_pool_, nullptr);
     fh2_timestamp_pool_ = VK_NULL_HANDLE;
   }
+  if (fh2_mark_pool_) {
+    dfn.vkDestroyQueryPool(device, fh2_mark_pool_, nullptr);
+    fh2_mark_pool_ = VK_NULL_HANDLE;
+  }
 
   for (auto& readback_pair : readback_buffers_) {
     ReadbackBuffer& readback = readback_pair.second;
@@ -2296,6 +2306,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_zone("gpu:IssueSwap");
   fh2::rtlog::OnSwap();
+  Fh2GpuMark(fh2::rtlog::GpuCategory::kSwap);
   SCOPE_profile_cpu_f("gpu");
   vertex_buffers_in_sync_[0] = 0;
   vertex_buffers_in_sync_[1] = 0;
@@ -4152,6 +4163,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   if (primitive_processing_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
       shader_32bit_index_dma) {
+    Fh2GpuMark(fh2::rtlog::GpuCategory::kDraw);
     deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
   } else {
     std::pair<VkBuffer, VkDeviceSize> index_buffer;
@@ -4183,6 +4195,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         primitive_processing_result.host_index_format == xenos::IndexFormat::kInt16
             ? VK_INDEX_TYPE_UINT16
             : VK_INDEX_TYPE_UINT32);
+    Fh2GpuMark(fh2::rtlog::GpuCategory::kDraw);
     deferred_command_buffer_.CmdVkDrawIndexed(primitive_processing_result.host_draw_vertex_count, 1,
                                               0, 0, 0);
   }
@@ -4997,15 +5010,41 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
   }
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  auto& counters = fh2::rtlog::g_counters;
+  std::vector<uint64_t> marks;
   for (uint64_t submission = from_submission; submission <= to_submission; ++submission) {
+    uint32_t slot = uint32_t(submission % kFh2TimestampSlots);
+    std::vector<uint8_t>& categories = fh2_mark_categories_[slot];
     uint64_t times[2];
-    uint32_t slot = uint32_t(submission % kFh2TimestampSlots) * 2;
-    if (dfn.vkGetQueryPoolResults(vulkan_device->device(), fh2_timestamp_pool_, slot, 2,
+    if (dfn.vkGetQueryPoolResults(vulkan_device->device(), fh2_timestamp_pool_, slot * 2, 2,
                                   sizeof(times), times, sizeof(uint64_t),
-                                  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS &&
-        times[1] >= times[0]) {
-      fh2::rtlog::g_counters.gpu_ns += uint64_t(double(times[1] - times[0]) * fh2_timestamp_period_ns_);
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS ||
+        times[1] < times[0]) {
+      categories.clear();
+      continue;
     }
+    auto to_ns = [this](uint64_t ticks) { return uint64_t(double(ticks) * fh2_timestamp_period_ns_); };
+    counters.gpu_ns += to_ns(times[1] - times[0]);
+    marks.resize(categories.size());
+    if (!categories.empty() &&
+        dfn.vkGetQueryPoolResults(vulkan_device->device(), fh2_mark_pool_,
+                                  slot * kFh2MarksPerSubmission, uint32_t(categories.size()),
+                                  marks.size() * sizeof(uint64_t), marks.data(), sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+      categories.clear();
+      continue;
+    }
+    // Interval i runs from mark i to mark i + 1 (or the end of the submission).
+    uint64_t previous = times[0];
+    uint8_t previous_category = uint8_t(fh2::rtlog::GpuCategory::kOther);
+    for (size_t i = 0; i <= categories.size(); ++i) {
+      uint64_t time = i < categories.size() ? marks[i] : times[1];
+      time = std::clamp(time, previous, times[1]);
+      counters.gpu_category_ns[previous_category] += to_ns(time - previous);
+      previous = time;
+      if (i < categories.size()) previous_category = categories[i];
+    }
+    categories.clear();
   }
 }
 
@@ -5457,10 +5496,16 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     uint32_t fh2_slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots) * 2;
     if (fh2_timestamp_pool_) {
       dfn.vkCmdResetQueryPool(command_buffer.buffer, fh2_timestamp_pool_, fh2_slot, 2);
+      if (fh2_mark_pool_) {
+        dfn.vkCmdResetQueryPool(command_buffer.buffer, fh2_mark_pool_,
+                                (fh2_slot / 2) * kFh2MarksPerSubmission, kFh2MarksPerSubmission);
+      }
       dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                               fh2_timestamp_pool_, fh2_slot);
     }
     deferred_command_buffer_.Execute(command_buffer.buffer);
+    // The next submission starts attributing from its beginning again.
+    fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
     if (fh2_timestamp_pool_) {
       dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                               fh2_timestamp_pool_, fh2_slot + 1);

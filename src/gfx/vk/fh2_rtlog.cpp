@@ -98,6 +98,15 @@ void OnSwap() {
         per(c.tex_load_bytes, l.tex_load_bytes) / 1e6,
         per(c.tex_loads_resolved, l.tex_loads_resolved), per(c.gpu_ns, l.gpu_ns) / 1e6,
         per(c.predicated_skips, l.predicated_skips));
+    std::string breakdown;
+    for (uint32_t i = 0; i < uint32_t(GpuCategory::kCount); ++i) {
+      double ms = per(c.gpu_category_ns[i], l.gpu_category_ns[i]) / 1e6;
+      if (ms >= 0.005) {
+        breakdown += fmt::format("{}{} {:.2f}", breakdown.empty() ? "" : ", ",
+                                 GpuCategoryName(GpuCategory(i)), ms);
+      }
+    }
+    REXGPU_INFO("[RTSTAT] GPU ms per frame by category: {}", breakdown);
     g_last_report = c;
   }
 }

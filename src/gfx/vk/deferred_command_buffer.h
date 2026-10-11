@@ -261,6 +261,15 @@ class DeferredCommandBuffer {
 
   void CmdVkEndRenderPass() { WriteCommand(Command::kVkEndRenderPass, 0); }
 
+  void CmdVkWriteTimestamp(VkPipelineStageFlagBits pipeline_stage, VkQueryPool query_pool,
+                           uint32_t query) {
+    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
+        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
+    args.query_pool = query_pool;
+    args.pipeline_stage = pipeline_stage;
+    args.query = query;
+  }
+
   // Dynamic rendering (VK_KHR_dynamic_rendering / Vulkan 1.3).
   void CmdVkBeginRendering(const VkRenderingInfo* rendering_info);
   void CmdVkEndRendering() { WriteCommand(Command::kVkEndRendering, 0); }
@@ -381,6 +390,7 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    kVkWriteTimestamp,
   };
 
   struct CommandHeader {
@@ -517,6 +527,12 @@ class DeferredCommandBuffer {
 
   struct ArgsVkEndQuery {
     VkQueryPool query_pool;
+    uint32_t query;
+  };
+
+  struct ArgsVkWriteTimestamp {
+    VkQueryPool query_pool;
+    VkPipelineStageFlagBits pipeline_stage;
     uint32_t query;
   };
 

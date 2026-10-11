@@ -15,6 +15,24 @@
 
 namespace fh2::rtlog {
 
+// GPU time categories, attributed between consecutive GPU timestamps.
+enum class GpuCategory : uint8_t {
+  kOther,
+  kDraw,
+  kTransfer,
+  kDump,
+  kResolveCopy,
+  kResolveClear,
+  kTextureLoad,
+  kSwap,
+  kCount,
+};
+inline const char* GpuCategoryName(GpuCategory category) {
+  static const char* const kNames[] = {"other", "draws", "transfers", "dumps", "resolve copy",
+                                       "resolve clear", "texture loads", "swap"};
+  return kNames[uint32_t(category)];
+}
+
 struct Counters {
   uint64_t draws = 0;
   uint64_t rt_changes = 0;       // render target set changes (render pass breaks)
@@ -29,6 +47,7 @@ struct Counters {
   uint64_t tex_loads_resolved = 0;  // loads overlapping a resolve destination
   uint64_t gpu_ns = 0;              // GPU execution time of completed submissions
   uint64_t predicated_skips = 0;    // draws skipped by predicated tiling bin checks
+  uint64_t gpu_category_ns[uint32_t(GpuCategory::kCount)] = {};
 };
 
 extern Counters g_counters;

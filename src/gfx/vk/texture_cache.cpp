@@ -1218,6 +1218,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                bool load_mips) {
   SCOPE_profile_zone("gpu:texture load");
+  command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kTextureLoad);
   {
     const TextureKey& key = texture.key();
     uint32_t address = key.base_page << 12;
