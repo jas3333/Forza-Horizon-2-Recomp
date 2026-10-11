@@ -1312,8 +1312,12 @@ void TodFindMaster() {
 }
 }  // namespace
 
+void InstallFh2ClockWatchKey();
+void InstallFh2CommandChannel();
 void InstallFh2DebugTools() {
-  REXLOG_INFO("[TODSCAN] game-clock keys: 8 = find clock, 7 = find master clock, 9 = +1 hour, 0 = next candidate");
+  InstallFh2ClockWatchKey();
+  InstallFh2CommandChannel();
+  REXLOG_INFO("[TODSCAN] game-clock keys: 8 = find clock, 6 = find code writing it, 7 = find master clock, 9 = +1 hour, 0 = next candidate");
   if (const char* env = std::getenv("FH2_TOD_ADDR")) {
     g_tod_selected = uint32_t(std::strtoul(env, nullptr, 16));
   }
@@ -1379,3 +1383,197 @@ void InstallFh2DebugTools() {
     REXLOG_INFO("[TODSCAN] {:08X}: {:.4f} -> {:.4f}", g_tod_selected, v, nv);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Debug: key 6 -- find the game code that writes the clock copy. After a
+// clock scan (key 8), takes the candidate rising at the time-of-day rate
+// (0.02-0.05 of a day per minute), puts a hardware write watchpoint on it in
+// every existing thread, and logs the writing guest code ([HWWATCH], to
+// stderr / play.stdout) for the first 16 writes, then removes them.
+#include <dirent.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/perf_event.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <rex/system/thread_state.h>
+namespace {
+uint32_t g_hw_guest = 0;
+std::atomic<int> g_hw_hits{0};
+std::vector<int> g_hw_fds;
+void HwWatchTrap(int, siginfo_t*, void*) {
+  int n = g_hw_hits.fetch_add(1);
+  if (n >= 16) return;
+  auto* ts = rex::runtime::ThreadState::Get();
+  PPCContext* c = ts ? ts->context() : nullptr;
+  char buf[200];
+  int len = snprintf(buf, sizeof(buf),
+                     "[HWWATCH] write %08X #%d fn=%08X pc=%08X lr=%08X r3=%08X r31=%08X tid=%d\n",
+                     g_hw_guest, n, c ? c->current_function : 0u, c ? c->current_instruction : 0u,
+                     c ? uint32_t(c->lr) : 0u, c ? c->r3.u32 : 0u, c ? c->r31.u32 : 0u,
+                     int(syscall(SYS_gettid)));
+  if (len > 0) (void)!write(2, buf, size_t(len));
+}
+void HwWatchArm(uint32_t guest) {
+  auto* mem = rex::system::kernel_state()->memory();
+  g_hw_guest = guest;
+  g_hw_hits = 0;
+  struct sigaction sa = {};
+  sa.sa_sigaction = HwWatchTrap;
+  sa.sa_flags = SA_SIGINFO | SA_RESTART;
+  sigaction(SIGTRAP, &sa, nullptr);
+  perf_event_attr attr = {};
+  attr.type = PERF_TYPE_BREAKPOINT;
+  attr.size = sizeof(attr);
+  attr.bp_type = HW_BREAKPOINT_W;
+  attr.bp_addr = reinterpret_cast<uint64_t>(mem->virtual_membase() + guest);
+  attr.bp_len = HW_BREAKPOINT_LEN_4;
+  attr.sample_period = 1;
+  attr.remove_on_exec = 1;
+  attr.sigtrap = 1;
+  attr.exclude_kernel = 1;
+  attr.exclude_hv = 1;
+  int ok = 0, failed = 0, last_errno = 0;
+  if (DIR* dir = opendir("/proc/self/task")) {
+    while (dirent* e = readdir(dir)) {
+      int tid = std::atoi(e->d_name);
+      if (tid <= 0) continue;
+      long fd = syscall(SYS_perf_event_open, &attr, tid, -1, -1, 0);
+      if (fd >= 0) {
+        g_hw_fds.push_back(int(fd));
+        ++ok;
+      } else {
+        ++failed;
+        last_errno = errno;
+      }
+    }
+    closedir(dir);
+  }
+  REXLOG_INFO("[HWWATCH] watching clock copy {:08X} in {} threads ({} failed, errno {})", guest,
+              ok, failed, last_errno);
+  // Remove after a few seconds (16 hits are plenty).
+  std::thread([] {
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    for (int fd : g_hw_fds) close(fd);
+    g_hw_fds.clear();
+    REXLOG_INFO("[HWWATCH] removed; {} writes seen (details in play.stdout)", g_hw_hits.load());
+  }).detach();
+}
+}  // namespace
+
+void InstallFh2ClockWatchKey() {
+  rex::ui::RegisterBind("bind_fh2_tod_watch", "6", "FH2: find the code writing the game clock", [] {
+    uint32_t addr = 0;
+    {
+      std::lock_guard<std::mutex> lock(g_tod_mutex);
+      for (const TodCandidate& c : g_tod_candidates) {
+        float rise = c.last - c.first;
+        if (c.last <= 1.0f && rise >= 0.02f && rise <= 0.05f) {
+          addr = c.addr;
+          break;
+        }
+      }
+    }
+    if (!addr) {
+      REXLOG_INFO("[HWWATCH] 6 pressed: no clock copy found yet (press 8 first)");
+      return;
+    }
+    if (!g_hw_fds.empty()) return;
+    HwWatchArm(addr);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Debug command channel: a named pipe "fh2ctl" in the working directory.
+// One command per line (e.g. `echo "key 8" > play/fh2ctl`); results go to the
+// log as [CTL] lines.
+//   key <name>          press a bound key (8, 6, 7, 9, 0, F12, F3, ...)
+//   peek <hex> [n]      log n 32-bit words (hex and float) at a guest address
+//   poke <hex> <float>  write a float to a guest address
+//   say <text>          log a marker
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sstream>
+#include <rex/ui/ui_event.h>
+namespace {
+void CtlCommand(const std::string& line) {
+  std::istringstream in(line);
+  std::string cmd;
+  in >> cmd;
+  if (cmd.empty()) return;
+  auto* mem = rex::system::kernel_state()->memory();
+  if (cmd == "key") {
+    std::string name;
+    in >> name;
+    rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(name);
+    if (vk == rex::ui::VirtualKey::kNone) {
+      REXLOG_INFO("[CTL] unknown key '{}'", name);
+      return;
+    }
+    rex::ui::KeyEvent e(nullptr, vk, 1, false, false, false, false, false);
+    bool handled = rex::ui::ProcessKeyEvent(e);
+    REXLOG_INFO("[CTL] key {} -> {}", name, handled ? "handled" : "no bind");
+  } else if (cmd == "peek") {
+    std::string a;
+    uint32_t n = 1;
+    in >> a >> n;
+    uint32_t addr = uint32_t(std::strtoul(a.c_str(), nullptr, 16)) & ~3u;
+    n = std::min<uint32_t>(std::max<uint32_t>(n, 1), 64);
+    auto* heap = mem->LookupHeap(addr);
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(addr, &info) ||
+        !(info.state & rex::memory::kMemoryAllocationCommit)) {
+      REXLOG_INFO("[CTL] peek {:08X}: not committed", addr);
+      return;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+      uint32_t w = __builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(addr + i * 4));
+      float f;
+      std::memcpy(&f, &w, 4);
+      REXLOG_INFO("[CTL] {:08X}: {:08X} {}", addr + i * 4, w, f);
+    }
+  } else if (cmd == "poke") {
+    std::string a;
+    float f = 0;
+    in >> a >> f;
+    uint32_t addr = uint32_t(std::strtoul(a.c_str(), nullptr, 16)) & ~3u;
+    TodWrite(mem, addr, f);
+    REXLOG_INFO("[CTL] poke {:08X} = {}", addr, f);
+  } else if (cmd == "say") {
+    std::string rest;
+    std::getline(in, rest);
+    REXLOG_INFO("[CTL] say:{}", rest);
+  } else {
+    REXLOG_INFO("[CTL] unknown command '{}'", cmd);
+  }
+}
+
+void CtlThreadMain() {
+  const char* path = "fh2ctl";
+  unlink(path);
+  if (mkfifo(path, 0600) != 0) {
+    REXLOG_INFO("[CTL] could not create pipe {} (errno {})", path, errno);
+    return;
+  }
+  REXLOG_INFO("[CTL] listening on {}/{}", std::filesystem::current_path().string(), path);
+  std::string pending;
+  while (true) {
+    int fd = open(path, O_RDONLY);  // blocks until a writer connects
+    if (fd < 0) return;
+    char buf[512];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+      pending.append(buf, size_t(n));
+      size_t nl;
+      while ((nl = pending.find('\n')) != std::string::npos) {
+        CtlCommand(pending.substr(0, nl));
+        pending.erase(0, nl + 1);
+      }
+    }
+    close(fd);
+  }
+}
+}  // namespace
+
+void InstallFh2CommandChannel() { std::thread(CtlThreadMain).detach(); }

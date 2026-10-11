@@ -284,6 +284,7 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   void OnRestored(ui::UIEvent& e) override;
 
   // WindowInputListener overrides
+  void SaveScreenshot();
   void OnKeyDown(ui::KeyEvent& e) override;
 
   PPCImageInfo ppc_info_;
