@@ -76,6 +76,45 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
 namespace rex::graphics::fh2vk {
 
 namespace {
+// FH2 full-frame strips: while a strip is drawn into the full-frame targets,
+// the draw's window offset is treated as 0 and the window scissor as the
+// whole frame (restored afterwards; the render target cache's ownership
+// tracking already saw the real values).
+class Fh2FullFrameRegisterOverride {
+ public:
+  explicit Fh2FullFrameRegisterOverride(RegisterFile& regs) : regs_(regs) {}
+  // The window scissor is in screen space (the window offset moves it into
+  // the strip target), so with the offset at 0 it selects the strip's rows of
+  // the full frame. widen_scissor: the whole frame instead (with dedup).
+  void Arm(uint32_t width, uint32_t height, bool widen_scissor) {
+    saved_offset_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
+    saved_tl_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
+    saved_br_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
+    regs_.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET] = 0;
+    if (widen_scissor) {
+      // Keep window_offset_disable (bit 31), scissor from (0, 0).
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] = saved_tl_ & 0x80000000u;
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] =
+          (saved_br_ & ~((0x3FFFu << 16) | 0x3FFFu)) | (height << 16) | width;
+    }
+    armed_ = true;
+  }
+  ~Fh2FullFrameRegisterOverride() {
+    if (armed_) {
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET] = saved_offset_;
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] = saved_tl_;
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] = saved_br_;
+    }
+  }
+
+ private:
+  RegisterFile& regs_;
+  bool armed_ = false;
+  uint32_t saved_offset_ = 0, saved_tl_ = 0, saved_br_ = 0;
+};
+}  // namespace
+
+namespace {
 
 // glslang default built-in resource limits.
 constexpr TBuiltInResource kGlslangDefaultTBuiltInResource = {
@@ -2308,6 +2347,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
                                        uint32_t frontbuffer_height) {
   SCOPE_profile_zone("gpu:IssueSwap");
   fh2::rtlog::OnSwap();
+  render_target_cache_->Fh2FullFrameEnd(false, 0);
   Fh2GpuMark(fh2::rtlog::GpuCategory::kSwap);
   SCOPE_profile_cpu_f("gpu");
   vertex_buffers_in_sync_[0] = 0;
@@ -3883,6 +3923,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     return draw_fail("render_target_update");
   }
 
+  // FH2 full-frame strips.
+  Fh2FullFrameRegisterOverride fh2_full_frame_override(*register_file_);
+  if (fh2_bin_strip_ && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0)) {
+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    uint32_t strip_y = uint32_t(std::max(-int32_t(window_offset.window_y_offset), 0));
+    if (render_target_cache_->Fh2FullFrameActive() &&
+        render_target_cache_->Fh2FullFrameTargetsChanged()) {
+      render_target_cache_->Fh2FullFrameEnd(true, strip_y);
+    } else if (!render_target_cache_->Fh2FullFrameActive() && strip_y == 0 &&
+               window_offset.window_x_offset == 0) {
+      // Frame size from the viewport, strip height from the window scissor.
+      float vp_y_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE));
+      float vp_y_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
+      float vp_x_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE));
+      float vp_x_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
+      auto scissor_tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+      auto scissor_br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+      uint32_t frame_width = uint32_t(std::lround(vp_x_offset + vp_x_scale));
+      uint32_t frame_height = uint32_t(std::lround(vp_y_offset + vp_y_scale));
+      uint32_t strip_height = uint32_t(scissor_br.br_y) - uint32_t(scissor_tl.tl_y);
+      if (frame_width && frame_height <= 2048 && frame_width <= 2048 &&
+          scissor_tl.tl_y == 0 && strip_height < frame_height) {
+        render_target_cache_->Fh2FullFrameBegin(frame_width, frame_height, strip_height);
+      }
+    }
+    if (render_target_cache_->Fh2FullFrameActive()) {
+      fh2_full_frame_override.Arm(render_target_cache_->fh2_full_frame_width(),
+                                  render_target_cache_->fh2_full_frame_height(), false);
+    }
+  }
+
   // Create the pipeline (for this, need the render pass from the render target
   // cache), translating the shaders - doing this now to obtain the used
   // textures.
@@ -4164,7 +4235,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // before drawing.
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
-      render_target_cache_->last_update_framebuffer());
+      render_target_cache_->Fh2FullFrameActive()
+          ? render_target_cache_->fh2_fullframe_framebuffer()
+          : render_target_cache_->last_update_framebuffer());
 
   // FH2 frame log: a fingerprint of the draw's content (shaders, geometry,
   // used constants, textures) to measure duplicates across predicated-tiling
@@ -4513,6 +4586,12 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   if (!BeginSubmission(true)) {
     return false;
+  }
+
+  if (render_target_cache_->Fh2FullFrameActive()) {
+    auto window_offset = register_file_->Get<reg::PA_SC_WINDOW_OFFSET>();
+    render_target_cache_->Fh2FullFrameCopyStripToHost(
+        uint32_t(std::max(-int32_t(window_offset.window_y_offset), 0)));
   }
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
@@ -5068,15 +5147,22 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
   sample_counts->StencilFail_B = 0;
 }
 
+
 void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
   switch (event) {
     case Pm4TraceEvent::kIndirectBuffer:
       fh2::rtlog::Log("IB {:08X} len {:X}", a, b);
       break;
-    case Pm4TraceEvent::kBinSelect:
+    case Pm4TraceEvent::kBinSelect: {
       fh2::rtlog::Log("BIN_SELECT {:08X}{:08X}", b, a);
       fh2_log_next_draw_placement_ = true;
-      break;
+      bool strip = !(a == 0xFFFFFFFFu && b == 0);
+      if (!strip && fh2_bin_strip_ && render_target_cache_) {
+        // All strips resolved by now.
+        render_target_cache_->Fh2FullFrameEnd(false, 0);
+      }
+      fh2_bin_strip_ = strip;
+    } break;
     case Pm4TraceEvent::kPredicatedSkip:
       ++fh2::rtlog::g_counters.predicated_skips;
       break;

@@ -974,6 +974,41 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipeline fh2_resolve_depth_pipelines_[3][2] = {};  // [samples][float24]
   bool fh2_resolve_pipelines_attempted_ = false;
   uint64_t fh2_next_render_target_id_ = 1;
+
+ public:
+  // FH2 full-frame strips: the predicated-tiling main pass is drawn into one
+  // full-size color + depth pair instead of the EDRAM-sized strip targets;
+  // each strip's rows are copied into the strip targets before its resolve,
+  // so everything downstream is unchanged.
+  bool Fh2FullFrameActive() const { return fh2_ff_.active; }
+  bool Fh2FullFrameBegin(uint32_t frame_width, uint32_t frame_height, uint32_t strip_height);
+  void Fh2FullFrameCopyStripToHost(uint32_t strip_y);
+  void Fh2FullFrameEnd(bool copy_strip_back, uint32_t strip_y);
+  bool Fh2FullFrameTargetsChanged() const;
+  const Framebuffer* fh2_fullframe_framebuffer() const { return &fh2_ff_.framebuffer; }
+  uint32_t fh2_full_frame_width() const { return fh2_ff_.width; }
+  uint32_t fh2_full_frame_height() const { return fh2_ff_.height; }
+
+ private:
+  struct Fh2FullFrame {
+    bool active = false;
+    VulkanRenderTarget* targets[2] = {};  // [0] depth, [1] color 0
+    uint32_t keys[2] = {};
+    uint32_t width = 0, height = 0, strip_height = 0;  // guest pixels
+    VkImage images[2] = {};
+    VkDeviceMemory memory[2] = {};
+    VkImageView views[2] = {};
+    uint32_t image_keys[2] = {};
+    uint32_t image_width = 0, image_height = 0;  // guest pixels
+    Framebuffer framebuffer;
+  };
+  Fh2FullFrame fh2_ff_;
+  bool Fh2FullFrameEnsureImages();
+  void Fh2FullFrameDestroyImages();
+  // Copies guest rows between a host render target and a full-frame image
+  // (both directions), with the layout transitions.
+  void Fh2FullFrameCopyRows(uint32_t index, bool to_full_frame, uint32_t host_y,
+                            uint32_t full_frame_y, uint32_t rows);
   // Narrows the transfers into each bound render target to the rows the
   // source wrote since it was copied from that target (see
   // VulkanRenderTarget::fh2_copied_from_id), and updates provenance.
