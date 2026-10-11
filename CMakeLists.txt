@@ -18,6 +18,7 @@ set(FORZAHORIZON2_SOURCES
     src/forzahorizon2_hook_sub_82d881e8.cpp
     src/forzahorizon2_hook_sub_824a6170.cpp
     src/forzahorizon2_hook_sub_823f8718.cpp
+    src/forzahorizon2_d3d_probe.cpp
 )
 
 if(WIN32)

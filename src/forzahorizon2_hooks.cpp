@@ -984,3 +984,67 @@ extern "C" REX_FUNC(sub_82B72A90) {
   __imp__sub_82B72A90(ctx, base);
 #endif
 }
+
+// FH2_SCAN_SHADERS=<seconds>:<out_dir> -- after the given time, sweep the
+// whole 4 GB guest address space for Xbox 360 shader containers (magic
+// 0x102A1100 vertex / 0x102A1101 pixel) and save each one (header + virtual
+// + physical part) as <out_dir>/<guest address>.bin. Reads go through
+// /proc/self/mem, so unmapped or protected ranges just fail instead of
+// faulting. Feeds tools/extract_shaders.py: most of FH2's engine shaders
+// arrive from LZX-compressed archives and only exist decompressed in memory.
+#include <fcntl.h>
+#include <unistd.h>
+#include <filesystem>
+namespace {
+struct ShaderMemoryScanner {
+  ShaderMemoryScanner() {
+    const char* spec = std::getenv("FH2_SCAN_SHADERS");
+    if (!spec || !*spec) return;
+    std::string s = spec;
+    size_t colon = s.find(':');
+    if (colon == std::string::npos) return;
+    int seconds = std::atoi(s.substr(0, colon).c_str());
+    std::string out_dir = s.substr(colon + 1);
+    std::thread([seconds, out_dir] {
+      std::this_thread::sleep_for(std::chrono::seconds(seconds));
+      auto* mem = rex::system::kernel_state() ? rex::system::kernel_state()->memory() : nullptr;
+      if (!mem) return;
+      uint8_t* base = mem->virtual_membase();
+      std::filesystem::create_directories(out_dir);
+      int fd = open("/proc/self/mem", O_RDONLY);
+      if (fd < 0) return;
+      constexpr size_t kChunk = 1 << 20;
+      std::vector<uint8_t> buf(kChunk + 64);
+      uint32_t saved = 0, readable_mb = 0;
+      for (uint64_t guest = 0x00010000; guest < 0x100000000ull; guest += kChunk) {
+        ssize_t got = pread(fd, buf.data(), kChunk + 36, off_t(reinterpret_cast<uintptr_t>(base + guest)));
+        if (got < 64) continue;
+        ++readable_mb;
+        for (ssize_t i = 0; i + 36 <= std::min<ssize_t>(got, kChunk); i += 4) {
+          if (buf[i] != 0x10 || buf[i + 1] != 0x2A || buf[i + 2] != 0x11 || buf[i + 3] > 1) continue;
+          auto be32 = [&](ssize_t o) {
+            return (uint32_t(buf[o]) << 24) | (uint32_t(buf[o + 1]) << 16) |
+                   (uint32_t(buf[o + 2]) << 8) | buf[o + 3];
+          };
+          uint32_t virt = be32(i + 4), phys = be32(i + 8);
+          if (!virt || !phys || virt > (1u << 20) || phys > (1u << 20)) continue;
+          std::vector<uint8_t> container(virt + phys);
+          if (pread(fd, container.data(), container.size(),
+                    off_t(reinterpret_cast<uintptr_t>(base + guest + i))) != ssize_t(container.size())) {
+            continue;
+          }
+          FILE* f = std::fopen(fmt::format("{}/{:08X}.bin", out_dir, uint32_t(guest + i)).c_str(), "wb");
+          if (f) {
+            std::fwrite(container.data(), 1, container.size(), f);
+            std::fclose(f);
+            ++saved;
+          }
+        }
+      }
+      close(fd);
+      REXKRNL_WARN("[SHADERSCAN] {} MB readable, {} shader containers saved to {}", readable_mb, saved,
+                   out_dir);
+    }).detach();
+  }
+} g_shader_memory_scanner;
+}  // namespace
