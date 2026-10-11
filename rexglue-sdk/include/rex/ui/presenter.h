@@ -17,6 +17,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -409,6 +410,8 @@ class Presenter {
     uint32_t display_aspect_ratio_x;
     uint32_t display_aspect_ratio_y;
     bool is_8bpc;
+    // Guest frames refreshed so far, including this one (presentation stats).
+    uint64_t serial = 0;
 
     GuestOutputProperties() { SetToInactive(); }
 
@@ -717,6 +720,19 @@ class Presenter {
   //
   // Call via PaintAndPresent.
   virtual PaintResult PaintAndPresentImpl(bool execute_ui_drawers) = 0;
+
+  // Presentation pacing stats ([PRESENT] log line every ~5 s): how evenly new
+  // guest frames reach the screen, which guest-side frame times can't show.
+  uint64_t guest_output_serial_ = 0;                    // producer side
+  std::atomic<uint64_t> guest_output_consumed_serial_{0};  // last acquired
+  struct PresentStats {
+    uint64_t last_serial = 0;
+    std::chrono::steady_clock::time_point last_new_frame_time, window_start;
+    uint32_t presents = 0, new_frames = 0, repeats = 0, skipped = 0;
+    uint32_t over_20ms = 0, over_30ms = 0;
+    double worst_ms = 0.0;
+  } present_stats_;
+  void NotePresented();
 
   // For calling from the painting implementations if requested.
   void ExecuteUIDrawersFromUIThread(UIDrawContext& ui_draw_context);

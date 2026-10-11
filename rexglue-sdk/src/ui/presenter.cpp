@@ -557,6 +557,7 @@ bool Presenter::RefreshGuestOutput(
   writable_properties.display_aspect_ratio_x = display_aspect_ratio_x;
   writable_properties.display_aspect_ratio_y = display_aspect_ratio_y;
   writable_properties.is_8bpc = false;
+  writable_properties.serial = ++guest_output_serial_;
   bool is_active = writable_properties.IsActive();
   if (is_active) {
     if (!RefreshGuestOutputImpl(guest_output_mailbox_writable_, frontbuffer_width,
@@ -848,6 +849,7 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
   // inactive.
   const GuestOutputProperties& properties = guest_output_properties_[mailbox_index];
   mailbox_index_or_max_if_inactive_out = properties.IsActive() ? mailbox_index : UINT32_MAX;
+  guest_output_consumed_serial_.store(properties.serial, std::memory_order_relaxed);
   if (properties_out) {
     *properties_out = properties;
   }
@@ -1502,6 +1504,9 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
   assert_false(execute_ui_drawers && !is_in_ui_thread_paint_);
   assert_true(surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable);
   PaintResult result = PaintAndPresentImpl(execute_ui_drawers);
+  if (result == PaintResult::kPresented || result == PaintResult::kPresentedSuboptimal) {
+    NotePresented();
+  }
   switch (result) {
     case PaintResult::kPresented:
       surface_paint_connection_was_optimal_at_successful_paint_ = true;
@@ -1522,6 +1527,46 @@ Presenter::PaintResult Presenter::PaintAndPresent(bool execute_ui_drawers) {
       break;
   }
   return result;
+}
+
+void Presenter::NotePresented() {
+  PresentStats& s = present_stats_;
+  auto now = std::chrono::steady_clock::now();
+  if (s.window_start == std::chrono::steady_clock::time_point()) {
+    s.window_start = now;
+  }
+  ++s.presents;
+  uint64_t serial = guest_output_consumed_serial_.load(std::memory_order_relaxed);
+  if (serial == s.last_serial) {
+    ++s.repeats;
+  } else {
+    if (s.last_serial && serial > s.last_serial + 1) {
+      s.skipped += uint32_t(serial - s.last_serial - 1);
+    }
+    if (s.last_serial) {
+      double ms = std::chrono::duration<double, std::milli>(now - s.last_new_frame_time).count();
+      s.worst_ms = std::max(s.worst_ms, ms);
+      s.over_20ms += ms > 20.0;
+      s.over_30ms += ms > 30.0;
+    }
+    ++s.new_frames;
+    s.last_serial = serial;
+    s.last_new_frame_time = now;
+  }
+  double window_ms = std::chrono::duration<double, std::milli>(now - s.window_start).count();
+  if (window_ms >= 5000.0) {
+    REXLOG_INFO(
+        "[PRESENT] {:.1f} s: {} presents, {} new guest frames ({:.1f}/s), {} repeated, {} never "
+        "shown; new-frame gaps >20 ms: {}, >30 ms: {}, worst {:.1f} ms",
+        window_ms / 1000.0, s.presents, s.new_frames, s.new_frames * 1000.0 / window_ms, s.repeats,
+        s.skipped, s.over_20ms, s.over_30ms, s.worst_ms);
+    uint64_t last_serial = s.last_serial;
+    auto last_time = s.last_new_frame_time;
+    s = PresentStats();
+    s.last_serial = last_serial;
+    s.last_new_frame_time = last_time;
+    s.window_start = now;
+  }
 }
 
 void Presenter::HandleUIDrawersChangeFromUIThread(bool drawers_were_empty) {
