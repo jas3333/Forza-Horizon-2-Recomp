@@ -1402,8 +1402,6 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
 
-          fh2::rtlog::NoteMemoryResolve(resolve_info.copy_dest_extent_start,
-                                        resolve_info.copy_dest_extent_length);
           // FH2: find the texture this resolve can write directly before the
           // invalidation below marks it outdated.
           Fh2DirectResolve fh2_direct;
@@ -1427,6 +1425,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
                                             resolve_info.copy_dest_extent_length);
 
+          if (!fh2_direct_ok) {
+            // Only resolves that can't go direct count: a texture over their
+            // range will be (re)loaded from guest memory.
+            fh2::rtlog::NoteMemoryResolve(resolve_info.copy_dest_extent_start,
+                                          resolve_info.copy_dest_extent_length);
+          }
           if (fh2_direct_ok) {
             Fh2RecordDirectResolve(texture_cache, fh2_direct);
             ++fh2::rtlog::g_counters.direct_resolves;
