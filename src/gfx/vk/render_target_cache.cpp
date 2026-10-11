@@ -1352,7 +1352,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           Fh2DirectResolve fh2_direct;
           const char* fh2_miss_reason = nullptr;
           bool fh2_direct_ok = false;
-          if (fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) != 0) {
+          // FH2_DIRECT_RESOLVE: 0 off, 1 all, 2 only full-width (>= 1280)
+          // resolves, 3 only smaller ones (bisecting).
+          int fh2_direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1);
+          uint32_t fh2_resolve_width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
+          if (fh2_direct_mode == 1 || (fh2_direct_mode == 2 && fh2_resolve_width >= 1280) ||
+              (fh2_direct_mode == 3 && fh2_resolve_width < 1280)) {
             fh2_direct_ok =
                 Fh2PrepareDirectResolve(resolve_info, texture_cache, fh2_direct, fh2_miss_reason);
           }
