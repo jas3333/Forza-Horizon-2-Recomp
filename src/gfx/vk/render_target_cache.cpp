@@ -1503,6 +1503,23 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       }
     }
     if (g_fh2_segment_draws++ == 0) g_fh2_segment_vs = vertex_shader.ucode_data_hash();
+    // FH2's clear draws (VS 1E6883FC...): log their exact state.
+    if (fh2::rtlog::g_active && (vertex_shader.ucode_data_hash() >> 40) == 0x1E6883) {
+      const RegisterFile& regs = register_file();
+      auto tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+      auto br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+      fh2::rtlog::Log(
+          "    clear draw: z_enable {} z_write {} zfunc {} stencil {} color mask {:08X} scissor "
+          "({},{})-({},{}) vp scale {:.1f},{:.1f} offset {:.1f},{:.1f} msaa {}x",
+          uint32_t(normalized_depth_control.z_enable), uint32_t(normalized_depth_control.z_write_enable),
+          uint32_t(normalized_depth_control.zfunc), uint32_t(normalized_depth_control.stencil_enable),
+          normalized_color_mask, uint32_t(tl.tl_x), uint32_t(tl.tl_y), uint32_t(br.br_x),
+          uint32_t(br.br_y), regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
+          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+          regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+          1u << uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples));
+    }
   }
 
   auto rb_surface_info = register_file().Get<reg::RB_SURFACE_INFO>();
