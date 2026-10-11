@@ -6646,7 +6646,16 @@ void main() {
     return;
   }
 #if SAMPLES > 1
-  float depth = texelFetch(src, c.src_offset + p, int((c.flags >> 8u) & 3u)).r;
+  float depth;
+  if ((c.flags & 1024u) != 0u) {
+    // 4x samples as 1x pixels: pixel q of the 1x view is sample
+    // (q.x & 1) | ((q.y & 1) << 1) of 4x pixel q >> 1 (as the EDRAM
+    // transfers map it, per host pixel).
+    ivec2 q = c.src_offset + p;
+    depth = texelFetch(src, q >> 1, (q.x & 1) | ((q.y & 1) << 1)).r;
+  } else {
+    depth = texelFetch(src, c.src_offset + p, int((c.flags >> 8u) & 3u)).r;
+  }
 #else
   float depth = texelFetch(src, c.src_offset + p, 0).r;
 #endif
@@ -6843,6 +6852,7 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   auto sample_select = resolve_info.copy_dest_coordinate_info.copy_sample_select;
   uint32_t samples_index;
   out.host_sample = 0;
+  out.sample_as_pixel = false;
   switch (msaa) {
     case xenos::MsaaSamples::k1X:
       samples_index = 0;
@@ -6897,8 +6907,17 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
     return false;
   }
   RenderTargetKey rt_key = source->key();
+  // A 1x depth resolve of a 4x render target (FH2's shadow maps: drawn at 4x,
+  // resolved as a double-size 1x view): read each sample as a pixel.
+  if (is_depth && msaa == xenos::MsaaSamples::k1X &&
+      rt_key.msaa_samples == xenos::MsaaSamples::k4X &&
+      fh2::rtlog::TimedEnvInt("FH2_DIRECT_SAMPLE_AS_PIXEL", 1) != 0) {
+    out.sample_as_pixel = true;
+    samples_index = 2;
+  }
   bool key_matches =
-      bool(rt_key.is_depth) == is_depth && rt_key.msaa_samples == msaa &&
+      bool(rt_key.is_depth) == is_depth &&
+      (rt_key.msaa_samples == msaa || out.sample_as_pixel) &&
       rt_key.GetPitchTiles() == edram.pitch_tiles &&
       (is_depth ? rt_key.GetDepthFormat() == depth_format
                 : xenos::ColorRenderTargetFormat(rt_key.resource_format) ==
@@ -6968,7 +6987,8 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   out.full_frame_image = VK_NULL_HANDLE;
   out.full_frame_set = VK_NULL_HANDLE;
   uint32_t full_frame_strip_y = 0;
-  if (Fh2FullFrameSource(source, out.full_frame_image, out.full_frame_set, full_frame_strip_y)) {
+  if (!out.sample_as_pixel &&
+      Fh2FullFrameSource(source, out.full_frame_image, out.full_frame_set, full_frame_strip_y)) {
     if (integer_view) {
       out.full_frame_image = VK_NULL_HANDLE;  // no integer view of the full frame
       out.full_frame_set = VK_NULL_HANDLE;
@@ -7034,7 +7054,8 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     constants.size[0] = int32_t(write.width);
     constants.size[1] = int32_t(write.height);
     constants.scale = direct.scale;
-    constants.flags = (direct.swap_red_blue ? 1u : 0u) | (direct.host_sample << 8);
+    constants.flags = (direct.swap_red_blue ? 1u : 0u) | (direct.host_sample << 8) |
+                      (direct.sample_as_pixel ? 1024u : 0u);
     command_buffer.CmdVkPushConstants(pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                       sizeof(constants), &constants);
     command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);

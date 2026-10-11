@@ -975,6 +975,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     bool is_depth = false;
     bool depth_float = false;
     uint32_t host_sample = 0;
+    // Depth resolved as 1x from a 4x render target: each 4x sample is one 1x
+    // pixel (Xbox trick for double-resolution shadow maps).
+    bool sample_as_pixel = false;
     // FH2 full-frame strips: read the full-frame image instead.
     VkImage full_frame_image = VK_NULL_HANDLE;
     VkDescriptorSet full_frame_set = VK_NULL_HANDLE;
