@@ -93,6 +93,38 @@ std::vector<TransferModeStep> ParseTransferModes() {
 const std::vector<TransferModeStep> g_transfer_steps = ParseTransferModes();
 }  // namespace
 
+int TimedEnvInt(const char* name, int default_value) {
+  struct Step {
+    double from_seconds;
+    int value;
+  };
+  static std::map<std::string, std::vector<Step>> parsed;
+  auto it = parsed.find(name);
+  if (it == parsed.end()) {
+    std::vector<Step> steps;
+    if (const char* env = std::getenv(name)) {
+      std::string text(env);
+      size_t pos = 0;
+      while (pos < text.size()) {
+        size_t comma = text.find(',', pos);
+        if (comma == std::string::npos) comma = text.size();
+        std::string item = text.substr(pos, comma - pos);
+        size_t at = item.find('@');
+        steps.push_back({at == std::string::npos ? 0.0 : std::atof(item.c_str() + at + 1),
+                         std::atoi(item.substr(0, at).c_str())});
+        pos = comma + 1;
+      }
+    }
+    it = parsed.emplace(name, std::move(steps)).first;
+  }
+  int value = default_value;
+  double seconds = SecondsSinceStart();
+  for (const auto& step : it->second) {
+    if (seconds >= step.from_seconds) value = step.value;
+  }
+  return value;
+}
+
 TransferMode CurrentTransferMode() {
   // Default: FH2 never reads EDRAM reinterpreted as an unrelated format (the
   // game clears after such rebinds), but its 4x-MSAA fast clears reach the 1x
@@ -144,14 +176,16 @@ void OnSwap() {
     REXGPU_INFO(
         "[RTSTAT] per frame (transfers mode {}): draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
-        "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}",
+        "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}, "
+        "direct resolves {:.1f} (misses {:.1f})",
         TransferModeName(CurrentTransferMode()), per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
         per(c.resolve_bytes, l.resolve_bytes) / 1e6, per(c.resolve_clears, l.resolve_clears),
         per(c.dumps, l.dumps), per(c.tex_loads, l.tex_loads),
         per(c.tex_load_bytes, l.tex_load_bytes) / 1e6,
         per(c.tex_loads_resolved, l.tex_loads_resolved), per(c.gpu_ns, l.gpu_ns) / 1e6,
-        per(c.predicated_skips, l.predicated_skips));
+        per(c.predicated_skips, l.predicated_skips), per(c.direct_resolves, l.direct_resolves),
+        per(c.direct_resolve_misses, l.direct_resolve_misses));
     std::string breakdown;
     for (uint32_t i = 0; i < uint32_t(GpuCategory::kCount); ++i) {
       double ms = per(c.gpu_category_ns[i], l.gpu_category_ns[i]) / 1e6;

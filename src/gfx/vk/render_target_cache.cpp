@@ -998,6 +998,8 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
+  Fh2ShutdownDirectResolve();
+
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
   // so ShutdownCommon is called by the RenderTargetCache destructor, when it's
@@ -1345,9 +1347,29 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
           command_buffer.CmdVkDispatch(copy_group_count_x, copy_group_count_y, 1);
 
+          // FH2: find the texture this resolve can write directly before the
+          // invalidation below marks it outdated.
+          Fh2DirectResolve fh2_direct;
+          const char* fh2_miss_reason = nullptr;
+          bool fh2_direct_ok = false;
+          if (fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) != 0) {
+            fh2_direct_ok =
+                Fh2PrepareDirectResolve(resolve_info, texture_cache, fh2_direct, fh2_miss_reason);
+          }
+
           // Invalidate textures and mark the range as scaled if needed.
           texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
                                             resolve_info.copy_dest_extent_length);
+
+          if (fh2_direct_ok) {
+            Fh2RecordDirectResolve(texture_cache, fh2_direct);
+            ++fh2::rtlog::g_counters.direct_resolves;
+            fh2::rtlog::Log("    direct -> texture at ({},{}) {}x{} (scaled)", fh2_direct.dst_x,
+                            fh2_direct.dst_y, fh2_direct.width, fh2_direct.height);
+          } else if (fh2_miss_reason) {
+            ++fh2::rtlog::g_counters.direct_resolve_misses;
+            fh2::rtlog::Log("    direct resolve miss: {}", fh2_miss_reason);
+          }
           written_address_out = resolve_info.copy_dest_extent_start;
           written_length_out = resolve_info.copy_dest_extent_length;
           copied = true;
@@ -6278,6 +6300,300 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     MarkEdramBufferModified();
   }
   return all_pipelines_available;
+}
+
+
+// ---------------------------------------------------------------------------
+// FH2 direct resolve (render target side)
+
+namespace {
+const char kFh2ResolveShader[] = R"(#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#if SAMPLES > 1
+  #if INT_VIEW
+layout(set = 0, binding = 0) uniform utexture2DMS src;
+  #else
+layout(set = 0, binding = 0) uniform texture2DMS src;
+  #endif
+#else
+  #if INT_VIEW
+layout(set = 0, binding = 0) uniform utexture2D src;
+  #else
+layout(set = 0, binding = 0) uniform texture2D src;
+  #endif
+#endif
+layout(set = 1, binding = 0) uniform writeonly image2D dst;
+layout(push_constant) uniform Constants {
+  ivec2 src_offset;
+  ivec2 dst_offset;
+  ivec2 size;
+  float scale;
+  uint flags;
+} c;
+vec4 Fetch(ivec2 p, int s) {
+#if SAMPLES > 1
+  #if INT_VIEW
+  return uintBitsToFloat(texelFetch(src, p, s));
+  #else
+  return texelFetch(src, p, s);
+  #endif
+#else
+  #if INT_VIEW
+  return uintBitsToFloat(texelFetch(src, p, 0));
+  #else
+  return texelFetch(src, p, 0);
+  #endif
+#endif
+}
+void main() {
+  ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+  if (any(greaterThanEqual(p, c.size))) {
+    return;
+  }
+  vec4 value = vec4(0.0);
+  for (int s = 0; s < SAMPLES; ++s) {
+    value += Fetch(c.src_offset + p, s);
+  }
+  value *= c.scale / float(SAMPLES);
+  if ((c.flags & 1u) != 0u) {
+    value = value.bgra;
+  }
+  imageStore(dst, c.dst_offset + p, value);
+}
+)";
+
+struct Fh2ResolveConstants {
+  int32_t src_offset[2];
+  int32_t dst_offset[2];
+  int32_t size[2];
+  float scale;
+  uint32_t flags;
+};
+}  // namespace
+
+bool VulkanRenderTargetCache::Fh2EnsureDirectResolvePipelines(VulkanTextureCache& texture_cache) {
+  if (fh2_resolve_pipelines_attempted_) {
+    return fh2_resolve_pipeline_layout_ != VK_NULL_HANDLE;
+  }
+  fh2_resolve_pipelines_attempted_ = true;
+  if (texture_cache.fh2_storage_set_layout() == VK_NULL_HANDLE) {
+    return false;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  VkDescriptorSetLayout set_layouts[2] = {descriptor_set_layout_sampled_image_,
+                                          texture_cache.fh2_storage_set_layout()};
+  VkPushConstantRange push_constants = {VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                        sizeof(Fh2ResolveConstants)};
+  VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  layout_info.setLayoutCount = 2;
+  layout_info.pSetLayouts = set_layouts;
+  layout_info.pushConstantRangeCount = 1;
+  layout_info.pPushConstantRanges = &push_constants;
+  if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr, &fh2_resolve_pipeline_layout_) !=
+      VK_SUCCESS) {
+    fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
+    return false;
+  }
+  static const uint32_t kSamples[3] = {1, 2, 4};
+  for (uint32_t samples_index = 0; samples_index < 3; ++samples_index) {
+    for (uint32_t integer_view = 0; integer_view < 2; ++integer_view) {
+      std::string source(kFh2ResolveShader);
+      source.insert(source.find('\n') + 1,
+                    fmt::format("#define SAMPLES {}\n#define INT_VIEW {}\n",
+                                kSamples[samples_index], integer_view));
+      std::vector<uint32_t> spirv;
+      std::string error;
+      if (!command_processor_.CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, source, spirv,
+                                                 error)) {
+        REXGPU_ERROR("fh2gfx: direct resolve shader failed to compile: {}", error);
+        continue;
+      }
+      fh2_resolve_pipelines_[samples_index][integer_view] = ui::vulkan::util::CreateComputePipeline(
+          vulkan_device, fh2_resolve_pipeline_layout_, spirv.data(), spirv.size() * sizeof(uint32_t));
+    }
+  }
+  REXGPU_INFO("fh2gfx: direct resolve pipelines ready");
+  return true;
+}
+
+void VulkanRenderTargetCache::Fh2ShutdownDirectResolve() {
+  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (auto& row : fh2_resolve_pipelines_) {
+    for (VkPipeline& pipeline : row) {
+      if (pipeline) dfn.vkDestroyPipeline(device, pipeline, nullptr);
+      pipeline = VK_NULL_HANDLE;
+    }
+  }
+  if (fh2_resolve_pipeline_layout_) {
+    dfn.vkDestroyPipelineLayout(device, fh2_resolve_pipeline_layout_, nullptr);
+    fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
+  }
+  fh2_resolve_pipelines_attempted_ = false;
+}
+
+bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveInfo& resolve_info,
+                                                      VulkanTextureCache& texture_cache,
+                                                      Fh2DirectResolve& out,
+                                                      const char*& miss_reason) {
+  miss_reason = nullptr;
+  const auto& control = resolve_info.rb_copy_control;
+  if (control.copy_src_select >= xenos::kMaxColorRenderTargets ||
+      control.copy_command != xenos::CopyCommand::kConvert) {
+    return false;  // depth / raw copies: not handled (not counted as misses)
+  }
+  const auto& edram = resolve_info.color_edram_info;
+  const auto& dest = resolve_info.copy_dest_info;
+  auto rt_format = xenos::ColorRenderTargetFormat(edram.format);
+  auto dest_format = xenos::TextureFormat(uint32_t(dest.copy_dest_format));
+  if (edram.format_is_64bpp || !VulkanTextureCache::Fh2IsDirectResolveFormat(dest_format)) {
+    miss_reason = "format";
+    return false;
+  }
+  bool rt_is_32f = rt_format == xenos::ColorRenderTargetFormat::k_32_FLOAT;
+  if (rt_is_32f != (dest_format == xenos::TextureFormat::k_32_FLOAT) ||
+      rt_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+    miss_reason = "format pair";
+    return false;
+  }
+  xenos::MsaaSamples msaa = edram.msaa_samples;
+  auto sample_select = resolve_info.copy_dest_coordinate_info.copy_sample_select;
+  uint32_t samples_index;
+  switch (msaa) {
+    case xenos::MsaaSamples::k1X:
+      samples_index = 0;
+      break;
+    case xenos::MsaaSamples::k2X:
+      if (!msaa_2x_attachments_supported_ || (sample_select != xenos::CopySampleSelect::k01 &&
+                                              sample_select != xenos::CopySampleSelect::k0123)) {
+        miss_reason = "2x sample select";
+        return false;
+      }
+      samples_index = 1;
+      break;
+    default:
+      if (sample_select != xenos::CopySampleSelect::k0123) {
+        miss_reason = "4x sample select";
+        return false;
+      }
+      samples_index = 2;
+      break;
+  }
+
+  // The source: one host render target owning the whole resolved area.
+  VulkanRenderTarget* source = nullptr;
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    auto* rt = static_cast<VulkanRenderTarget*>(rectangle.render_target);
+    if (source && rt != source) {
+      miss_reason = "several source RTs";
+      return false;
+    }
+    source = rt;
+  }
+  if (!source) {
+    miss_reason = "no source RT";
+    return false;
+  }
+  RenderTargetKey rt_key = source->key();
+  if (rt_key.is_depth || rt_key.msaa_samples != msaa || rt_key.GetPitchTiles() != edram.pitch_tiles ||
+      xenos::ColorRenderTargetFormat(rt_key.resource_format) !=
+          xenos::GetStorageColorFormat(rt_format)) {  // gamma excluded above
+    miss_reason = "source RT key";
+    return false;
+  }
+
+  uint32_t scale_x = draw_resolution_scale_x(), scale_y = draw_resolution_scale_y();
+  bool scaled = scale_x > 1 || scale_y > 1;
+  uint32_t dest_pitch = resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 * 32;
+  if (!texture_cache.Fh2FindResolveTarget(resolve_info.copy_dest_base, dest_pitch, dest_format,
+                                          scaled, out.target)) {
+    miss_reason = "no up-to-date target texture";
+    return false;
+  }
+  if (!Fh2EnsureDirectResolvePipelines(texture_cache)) {
+    miss_reason = "pipelines";
+    return false;
+  }
+  bool integer_view = false;
+  GetColorOwnershipTransferVulkanFormat(rt_format, msaa, &integer_view);
+  if (!fh2_resolve_pipelines_[samples_index][integer_view]) {
+    miss_reason = "pipeline variant";
+    return false;
+  }
+
+  // Source position: tiles between the render target base and the resolve
+  // base, then the 8-pixel-aligned offset within the resolve region.
+  uint32_t pitch = edram.pitch_tiles;
+  uint32_t delta = (edram.base_tiles - rt_key.base_tiles) & (xenos::kEdramTileCount - 1);
+  uint32_t tile_width = xenos::kEdramTileWidthSamples >> (msaa >= xenos::MsaaSamples::k4X ? 1 : 0);
+  uint32_t tile_height = xenos::kEdramTileHeightSamples >> (msaa >= xenos::MsaaSamples::k2X ? 1 : 0);
+  uint32_t src_x = (delta % pitch) * tile_width +
+                   uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) * 8;
+  uint32_t src_y = (delta / pitch) * tile_height +
+                   uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) * 8;
+  uint32_t dst_x = out.target.x + uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8;
+  uint32_t dst_y = out.target.y + uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8;
+  uint32_t width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
+  uint32_t height = resolve_info.height_div_8 * 8;
+  if (dst_x >= out.target.width || dst_y >= out.target.height) {
+    miss_reason = "outside the texture";
+    return false;
+  }
+  width = std::min(width, out.target.width - dst_x);
+  height = std::min(height, out.target.height - dst_y);
+
+  out.source = source;
+  out.src_x = int32_t(src_x * scale_x);
+  out.src_y = int32_t(src_y * scale_y);
+  out.dst_x = int32_t(dst_x * scale_x);
+  out.dst_y = int32_t(dst_y * scale_y);
+  out.width = width * scale_x;
+  out.height = height * scale_y;
+  out.samples_index = samples_index;
+  out.integer_view = integer_view;
+  out.scale = std::ldexp(1.0f, int32_t(dest.copy_dest_exp_bias));
+  out.swap_red_blue = dest.copy_dest_swap && dest_format != xenos::TextureFormat::k_32_FLOAT;
+  return true;
+}
+
+void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture_cache,
+                                                     const Fh2DirectResolve& direct) {
+  VulkanRenderTarget& rt = *direct.source;
+  command_processor_.PushImageMemoryBarrier(
+      rt.image(), ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+      rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, rt.current_access_mask(),
+      VK_ACCESS_SHADER_READ_BIT, rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  VulkanTextureCache::VulkanTexture& texture = *direct.target.texture;
+  texture_cache.Fh2BeginResolveWrite(texture);
+  command_processor_.SubmitBarriers(true);
+
+  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+  command_processor_.BindExternalComputePipeline(
+      fh2_resolve_pipelines_[direct.samples_index][direct.integer_view]);
+  VkDescriptorSet sets[2] = {rt.GetDescriptorSetTransferSource(),
+                             texture.Fh2GetStorageDescriptorSet()};
+  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                         fh2_resolve_pipeline_layout_, 0, 2, sets, 0, nullptr);
+  Fh2ResolveConstants constants;
+  constants.src_offset[0] = direct.src_x;
+  constants.src_offset[1] = direct.src_y;
+  constants.dst_offset[0] = direct.dst_x;
+  constants.dst_offset[1] = direct.dst_y;
+  constants.size[0] = int32_t(direct.width);
+  constants.size[1] = int32_t(direct.height);
+  constants.scale = direct.scale;
+  constants.flags = direct.swap_red_blue ? 1u : 0u;
+  command_buffer.CmdVkPushConstants(fh2_resolve_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                    sizeof(constants), &constants);
+  command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
+  command_buffer.CmdVkDispatch((direct.width + 7) / 8, (direct.height + 7) / 8, 1);
+  texture_cache.Fh2EndResolveWrite(texture);
 }
 
 }  // namespace rex::graphics::fh2vk

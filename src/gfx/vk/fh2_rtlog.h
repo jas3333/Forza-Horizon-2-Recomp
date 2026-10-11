@@ -46,6 +46,8 @@ struct Counters {
   uint64_t tex_load_bytes = 0;
   uint64_t tex_loads_resolved = 0;  // loads overlapping a resolve destination
   uint64_t gpu_ns = 0;              // GPU execution time of completed submissions
+  uint64_t direct_resolves = 0;     // resolves written straight into textures
+  uint64_t direct_resolve_misses = 0;  // color resolves that couldn't be
   uint64_t predicated_skips = 0;    // draws skipped by predicated tiling bin checks
   uint64_t gpu_category_ns[uint32_t(GpuCategory::kCount)] = {};
 };
@@ -65,6 +67,10 @@ double SecondsSinceStart();
 // by time (an entry @0 overrides the default).
 enum class TransferMode { kAll, kSameFormat, kNone };
 TransferMode CurrentTransferMode();
+
+// Integer setting from an environment variable "value@seconds,value@seconds"
+// (the last entry whose time has passed wins; default before any).
+int TimedEnvInt(const char* name, int default_value);
 const char* TransferModeName(TransferMode mode);
 
 // Resolve destinations of the logged and recent frames, to tag texture loads

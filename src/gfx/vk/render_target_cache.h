@@ -880,6 +880,29 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipeline resolve_fsi_clear_32bpp_pipeline_ = VK_NULL_HANDLE;
   VkPipeline resolve_fsi_clear_64bpp_pipeline_ = VK_NULL_HANDLE;
 
+  // FH2 direct resolve: color resolves written by compute straight from the
+  // host render target into the texture that samples them (see
+  // VulkanTextureCache::Fh2FindResolveTarget).
+  struct Fh2DirectResolve {
+    VulkanRenderTarget* source = nullptr;
+    VulkanTextureCache::Fh2ResolveTarget target;
+    int32_t src_x = 0, src_y = 0;  // scaled pixels in the render target
+    int32_t dst_x = 0, dst_y = 0;  // scaled texels in the texture
+    uint32_t width = 0, height = 0;  // scaled
+    uint32_t samples_index = 0;      // 0: 1x, 1: 2x, 2: 4x
+    bool integer_view = false;
+    float scale = 1.0f;
+    bool swap_red_blue = false;
+  };
+  bool Fh2PrepareDirectResolve(const draw_util::ResolveInfo& resolve_info,
+                               VulkanTextureCache& texture_cache, Fh2DirectResolve& out,
+                               const char*& miss_reason);
+  void Fh2RecordDirectResolve(VulkanTextureCache& texture_cache, const Fh2DirectResolve& direct);
+  bool Fh2EnsureDirectResolvePipelines(VulkanTextureCache& texture_cache);
+  void Fh2ShutdownDirectResolve();
+  VkPipelineLayout fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline fh2_resolve_pipelines_[3][2] = {};
+  bool fh2_resolve_pipelines_attempted_ = false;
   std::vector<Transfer> fh2_filtered_transfers_[1 + xenos::kMaxColorRenderTargets];
 };
 

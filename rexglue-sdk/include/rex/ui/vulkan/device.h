@@ -106,6 +106,7 @@ class VulkanDevice {
     bool occlusionQueryPrecise = false;
     bool vertexPipelineStoresAndAtomics = false;
     bool fragmentStoresAndAtomics = false;
+    bool shaderStorageImageWriteWithoutFormat = false;
     bool shaderClipDistance = false;
     bool shaderCullDistance = false;
     bool sparseBinding = false;

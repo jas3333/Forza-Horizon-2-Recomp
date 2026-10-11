@@ -11,6 +11,7 @@
  */
 
 #include <array>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -28,6 +29,7 @@ class VulkanCommandProcessor;
 
 class VulkanTextureCache final : public TextureCache {
  public:
+  friend class VulkanRenderTargetCache;
   // Sampler parameters that can be directly converted to a host sampler or used
   // for checking whether samplers bindings are up to date.
   union SamplerParameters {
@@ -193,6 +195,8 @@ class VulkanTextureCache final : public TextureCache {
       kTransferDestination,
       kGuestShaderSampled,
       kSwapSampled,
+      // FH2 direct resolve: written by a compute shader (GENERAL layout).
+      kFh2ComputeWrite,
     };
 
     // Takes ownership of the image and its memory.
@@ -210,6 +214,12 @@ class VulkanTextureCache final : public TextureCache {
     }
 
     VkImageView GetView(bool is_signed, uint32_t host_swizzle, bool is_array = true);
+
+    // FH2 direct resolve: storage image descriptor for writing mip 0 (only for
+    // textures created with storage usage).
+    bool fh2_storage() const { return fh2_storage_; }
+    void fh2_set_storage(bool storage) { fh2_storage_ = storage; }
+    VkDescriptorSet Fh2GetStorageDescriptorSet();
     VkImageView GetOrCreate3DAs2DImageView(bool is_signed, uint32_t host_swizzle);
 
    private:
@@ -262,6 +272,9 @@ class VulkanTextureCache final : public TextureCache {
 
     VkImage image_;
     VmaAllocation allocation_;
+    bool fh2_storage_ = false;
+    VkImageView fh2_storage_view_ = VK_NULL_HANDLE;
+    VkDescriptorSet fh2_storage_set_ = VK_NULL_HANDLE;
 
     Usage usage_ = Usage::kUndefined;
 
@@ -318,6 +331,36 @@ class VulkanTextureCache final : public TextureCache {
   void ShutdownScaledResolveBuffer();
 
   const HostFormatPair& GetHostFormatPair(TextureKey key) const;
+
+ public:
+  // FH2 direct resolve: a texture that already holds (up to date) the guest
+  // range a color resolve writes, so the resolve can go straight into its
+  // image instead of through guest memory and a texture reload.
+  struct Fh2ResolveTarget {
+    VulkanTexture* texture = nullptr;
+    uint32_t x = 0, y = 0;            // unscaled texel offset of the resolve
+    uint32_t width = 0, height = 0;   // unscaled texture size
+  };
+  bool Fh2FindResolveTarget(uint32_t dest_address, uint32_t dest_pitch_texels,
+                            xenos::TextureFormat format, bool scaled, Fh2ResolveTarget& out);
+  // Barrier for the compute write; then revalidation after it was recorded.
+  void Fh2BeginResolveWrite(VulkanTexture& texture);
+  void Fh2EndResolveWrite(VulkanTexture& texture);
+  VkDescriptorSetLayout fh2_storage_set_layout() const { return fh2_storage_set_layout_; }
+  static bool Fh2IsDirectResolveFormat(xenos::TextureFormat format) {
+    return format == xenos::TextureFormat::k_8_8_8_8 ||
+           format == xenos::TextureFormat::k_2_10_10_10 ||
+           format == xenos::TextureFormat::k_32_FLOAT;
+  }
+
+ private:
+  bool Fh2InitializeDirectResolve();
+  void Fh2ShutdownDirectResolve();
+  // Guest base address -> key of a texture loaded from resolve output.
+  std::map<uint32_t, TextureKey> fh2_resolve_texture_keys_;
+  VkDescriptorSetLayout fh2_storage_set_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool fh2_storage_pool_ = VK_NULL_HANDLE;
+  bool fh2_storage_format_supported_[64] = {};
 
   void GetTextureUsageMasks(VulkanTexture::Usage usage, VkPipelineStageFlags& stage_mask,
                             VkAccessFlags& access_mask, VkImageLayout& layout);
