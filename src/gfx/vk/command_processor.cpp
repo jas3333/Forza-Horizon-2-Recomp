@@ -3828,7 +3828,7 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
     VulkanCommandProcessor* processor = nullptr;
     uint32_t index = 0, old_value = 0;
     ~Fh2ConstantOverride() {
-      if (processor) processor->WriteRegister(index, old_value);
+      if (processor) processor->DrawWriteRegister(index, old_value);
     }
   } fh2_motion_blur_override;
   if (pixel_shader && pixel_shader->ucode_data_hash() == 0x614588022744BF6Bull &&
@@ -3836,7 +3836,7 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
     uint32_t index = XE_GPU_REG_SHADER_CONSTANT_000_X + (256 + 42) * 4;
     uint32_t old_value = regs[index];
     if (old_value != 0) {
-      WriteRegister(index, 0);
+      DrawWriteRegister(index, 0);
       fh2_motion_blur_override.processor = this;
       fh2_motion_blur_override.index = index;
       fh2_motion_blur_override.old_value = old_value;
@@ -7493,13 +7493,11 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
 // FH2 renderer split (see command_processor.h)
 
 namespace {
-__attribute__((tls_model("initial-exec"))) thread_local bool g_fh2_draw_side = false;
-// Marks the current thread as running draw-side code for its lifetime.
-struct Fh2DrawSideScope {
-  bool previous;
-  Fh2DrawSideScope() : previous(g_fh2_draw_side) { g_fh2_draw_side = true; }
-  ~Fh2DrawSideScope() { g_fh2_draw_side = previous; }
-};
+// Draw-side code never calls the parser-side overrides (WriteRegister,
+// IssueDraw, ...): it uses the Draw* / *Impl functions directly, so no
+// thread-local "which side am I" flag is needed (a TLS variable in this
+// dlopen()ed plugin costs a __tls_get_addr call per access).
+struct Fh2DrawSideScope {};
 constexpr uint64_t kFh2QueueSize = uint64_t(32) << 20;
 inline uint32_t Fh2AlignOp(uint32_t size) { return (size + 7) & ~uint32_t(7); }
 inline void Fh2CpuRelax(uint32_t& spins) {
@@ -7518,7 +7516,7 @@ inline bool Fh2IsSideEffectRegister(uint32_t index) {
 }
 }  // namespace
 
-bool VulkanCommandProcessor::Fh2OnDrawSide() const { return g_fh2_draw_side; }
+bool VulkanCommandProcessor::Fh2OnDrawSide() const { return false; }
 
 uint8_t* VulkanCommandProcessor::Fh2Reserve(uint32_t size) {
   const uint64_t capacity = fh2_queue_.size();
@@ -7679,10 +7677,6 @@ void VulkanCommandProcessor::OnOrderedPacketEnd() {
 }
 
 void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
-  if (g_fh2_draw_side) {
-    DrawWriteRegister(index, value);
-    return;
-  }
   if (Fh2IsSideEffectRegister(index)) {
     bool was_ordered = fh2_in_ordered_;
     if (!was_ordered) {
@@ -7714,10 +7708,6 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
 void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                                    uint32_t num_registers) {
-  if (g_fh2_draw_side) {
-    DrawWriteRegistersFromMem(start_index, base, num_registers);
-    return;
-  }
   if (!num_registers) {
     return;
   }
@@ -7778,7 +7768,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
-  if (g_fh2_draw_side || Fh2Inline()) {
+  if (Fh2Inline()) {
     Fh2DrawSideScope draw_side;
     return IssueDrawImpl(prim_type, index_count, index_buffer_info, major_mode_explicit);
   }
@@ -7796,7 +7786,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 }
 
 void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
-  if (g_fh2_draw_side || Fh2Inline()) {
+  if (Fh2Inline()) {
     Fh2DrawSideScope draw_side;
     OnPm4TraceImpl(event, a, b);
     return;
@@ -7812,7 +7802,7 @@ void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_
 }
 
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
-  if (g_fh2_draw_side || Fh2Inline()) {
+  if (Fh2Inline()) {
     Fh2DrawSideScope draw_side;
     OnPrimaryBufferEndImpl();
     return;
