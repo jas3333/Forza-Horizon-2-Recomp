@@ -1660,7 +1660,11 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
         // lighting round-trips data between depth and color targets (without
         // both directions the ground and hills were lit at night; measured
         // at 22:00: +1.4 ms GPU at 3x, versus +4.4 ms for all classes).
-        int keep_classes = fh2::rtlog::TimedEnvInt("FH2_XFER_KEEP", 3);
+        // Default 1216 = fine mode (1024) + 128 (8_8_8_8 -> D24FS8) + 64
+        // (other depth -> color): bisected at 22:00 by removing one pair at a
+        // time -- these two are the ones the night lighting needs; all
+        // depth<->color (3) cost ~3 ms more GPU at 3x for the same image.
+        int keep_classes = fh2::rtlog::TimedEnvInt("FH2_XFER_KEEP", 1216);
         for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
           fh2_filtered_transfers_[i].clear();
           if (!depth_and_color_render_targets[i]) continue;
