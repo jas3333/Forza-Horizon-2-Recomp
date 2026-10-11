@@ -3791,9 +3791,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // earlier strip of this tiled pass is skipped.
   uint64_t fh2_draw_fingerprint = 0;
   bool fh2_dedup_draw = false;
+  // Only order-independent draws: they write depth with an ordinary test
+  // (the z-buffer makes the order irrelevant), no stencil, no blending. Draws
+  // that rely on depth already laid down (shadow projection / decals with
+  // depth write off, EQUAL tests, stencil passes) must stay in strip order.
+  auto fh2_depth_control = draw_util::GetNormalizedDepthControl(regs);
+  bool fh2_order_independent =
+      fh2_depth_control.z_enable && fh2_depth_control.z_write_enable &&
+      fh2_depth_control.zfunc != xenos::CompareFunction::kEqual &&
+      fh2_depth_control.zfunc != xenos::CompareFunction::kNotEqual &&
+      !fh2_depth_control.stencil_enable && !Fh2DrawBlends();
   if (fh2_bin_strip_ && render_target_cache_->Fh2FullFrameActive() && !memexport_used_vertex &&
       !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2) == 2 &&
-      !Fh2DrawBlends()) {
+      fh2_order_independent) {
     if (fh2_full_frame_pass_ != fh2::rtlog::g_counters.full_frame_passes) {
       fh2_full_frame_pass_ = fh2::rtlog::g_counters.full_frame_passes;
       fh2_full_frame_drawn_.clear();
