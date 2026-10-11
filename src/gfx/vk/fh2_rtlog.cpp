@@ -262,6 +262,7 @@ struct PassStat {
   uint64_t ns = 0;
   uint64_t draws = 0;
   uint64_t count = 0;
+  uint64_t events[3] = {};
 };
 std::vector<PassStat> g_pass_stats;
 std::unordered_map<std::string, uint32_t> g_pass_index;
@@ -299,6 +300,12 @@ void PassAddDraw() {
   }
 }
 
+void PassAddEvent(int kind) {
+  if (g_pass_profile && g_current_pass < g_pass_stats.size()) {
+    ++g_pass_stats[g_current_pass].events[kind];
+  }
+}
+
 void PassAddGpuTime(uint32_t pass_id, uint64_t ns) {
   if (pass_id < g_pass_stats.size()) {
     g_pass_stats[pass_id].ns += ns;
@@ -328,9 +335,12 @@ static void PassProfileOnSwap() {
                   g_pass_stats.size(), double(total) / 1e6 / frames);
       for (size_t i = 0; i < sorted.size() && i < 30; ++i) {
         const PassStat& s = *sorted[i];
-        REXGPU_INFO("[PASSPROF] {:6.3f} ms  {:5.0f} draws  (in {:.0f}% of frames)  {}",
-                    double(s.ns) / 1e6 / frames, double(s.draws) / frames,
-                    100.0 * double(s.count) / frames, s.key);
+        REXGPU_INFO(
+            "[PASSPROF] {:6.3f} ms  {:5.0f} draws  {:4.0f} rp begins  {:4.0f} barriers  {:5.0f} "
+            "pipeline binds  (in {:.0f}% of frames)  {}",
+            double(s.ns) / 1e6 / frames, double(s.draws) / frames, double(s.events[0]) / frames,
+            double(s.events[1]) / frames, double(s.events[2]) / frames,
+            100.0 * double(s.count) / frames, s.key);
       }
       g_pass_stats.clear();
       g_pass_index.clear();

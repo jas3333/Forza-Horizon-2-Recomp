@@ -3178,6 +3178,7 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     return false;
   }
   EndRenderPass();
+  fh2::rtlog::PassAddEvent(1);
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);
     bool is_last = it_next == pending_barriers_.cend();
@@ -3273,6 +3274,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
+    fh2::rtlog::PassAddEvent(0);
   }
   in_render_pass_ = true;
 }
@@ -3364,6 +3366,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
+    fh2::rtlog::PassAddEvent(0);
   }
   in_render_pass_ = true;
 }
@@ -3647,6 +3650,7 @@ void VulkanCommandProcessor::BindExternalGraphicsPipeline(VkPipeline pipeline,
     return;
   }
   deferred_command_buffer_.CmdVkBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+  fh2::rtlog::PassAddEvent(2);
   current_external_graphics_pipeline_ = pipeline;
   current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
   current_guest_graphics_pipeline_layout_ = VK_NULL_HANDLE;
@@ -4096,6 +4100,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   }
   if (current_guest_graphics_pipeline_ != pipeline) {
     deferred_command_buffer_.CmdVkBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    fh2::rtlog::PassAddEvent(2);
     current_guest_graphics_pipeline_ = pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }

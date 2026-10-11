@@ -111,6 +111,9 @@ extern bool g_pass_profile;
 // profiling.
 uint32_t PassBegin(const std::string& description);
 void PassAddDraw();
+// Events inside the current pass: 0 render pass begin, 1 barrier batch,
+// 2 graphics pipeline bind.
+void PassAddEvent(int kind);
 void PassAddGpuTime(uint32_t pass_id, uint64_t ns);
 
 template <typename... Args>
