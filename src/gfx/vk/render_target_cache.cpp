@@ -6911,9 +6911,9 @@ void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
   for (const Transfer& transfer : depth_transfers) {
     single_source &= transfer.source == source;
   }
-  if (draw_reads_depth || !single_source || source->fh2_virtual ||
-      source->fh2_copied_from_id == depth->fh2_id) {
-    // (A copy-back from a deferred copy of this target is narrowed instead.)
+  // (A copy-back from a deferred copy of this target -- a virtual source --
+  // is narrowed instead.)
+  if (draw_reads_depth || !single_source || source->fh2_virtual) {
     Fh2Materialize(depth, "new transfers");
     return;
   }
