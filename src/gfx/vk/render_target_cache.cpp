@@ -1672,6 +1672,36 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                source_key.resource_format == dest_key.resource_format;
             int cls = source_key.is_depth ? (dest_key.is_depth ? 4 : 1)
                                           : (dest_key.is_depth ? 2 : 8);
+            // Fine mode (bit 1024): depth<->color split by format pair --
+            // 16 D24S8->2_10_10_10_FLOAT, 32 D24FS8->8_8_8_8, 64 other D->C,
+            // 128 8_8_8_8->D24FS8, 256 2_10_10_10_FLOAT->D24S8, 512 other C->D.
+            if ((keep_classes & 1024) && (cls == 1 || cls == 2)) {
+              auto depth_fmt = [](RenderTargetKey k) {
+                return xenos::DepthRenderTargetFormat(k.resource_format);
+              };
+              auto color_fmt = [](RenderTargetKey k) {
+                return xenos::ColorRenderTargetFormat(k.resource_format);
+              };
+              if (cls == 1) {
+                RenderTargetKey d = source_key, c = dest_key;
+                cls = depth_fmt(d) == xenos::DepthRenderTargetFormat::kD24S8 &&
+                              color_fmt(c) == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT
+                          ? 16
+                      : depth_fmt(d) == xenos::DepthRenderTargetFormat::kD24FS8 &&
+                              color_fmt(c) == xenos::ColorRenderTargetFormat::k_8_8_8_8
+                          ? 32
+                          : 64;
+              } else {
+                RenderTargetKey c = source_key, d = dest_key;
+                cls = depth_fmt(d) == xenos::DepthRenderTargetFormat::kD24FS8 &&
+                              color_fmt(c) == xenos::ColorRenderTargetFormat::k_8_8_8_8
+                          ? 128
+                      : depth_fmt(d) == xenos::DepthRenderTargetFormat::kD24S8 &&
+                              color_fmt(c) == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT
+                          ? 256
+                          : 512;
+              }
+            }
             bool keep = transfer_mode == fh2::rtlog::TransferMode::kSameFormat &&
                         (same_format || keeps_old || (keep_classes & cls));
             if (keep) fh2_filtered_transfers_[i].push_back(transfer);
