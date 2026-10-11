@@ -1654,6 +1654,10 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
           // Anything but "source x 1 + dest x 0" (color and alpha) blends.
           return (fh2_regs[kBlendControls[color_index]] & 0x1FFF1FFF) != 0x00010001;
         };
+        // FH2_XFER_KEEP (bitmask, experiment): also keep cross-format
+        // transfers of a class -- 1 depth->color, 2 color->depth,
+        // 4 depth->depth (other format), 8 color->color (other format).
+        int keep_classes = fh2::rtlog::TimedEnvInt("FH2_XFER_KEEP", 0);
         for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
           fh2_filtered_transfers_[i].clear();
           if (!depth_and_color_render_targets[i]) continue;
@@ -1663,8 +1667,10 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
             RenderTargetKey source_key = transfer.source->key();
             bool same_format = source_key.is_depth == dest_key.is_depth &&
                                source_key.resource_format == dest_key.resource_format;
+            int cls = source_key.is_depth ? (dest_key.is_depth ? 4 : 1)
+                                          : (dest_key.is_depth ? 2 : 8);
             bool keep = transfer_mode == fh2::rtlog::TransferMode::kSameFormat &&
-                        (same_format || keeps_old);
+                        (same_format || keeps_old || (keep_classes & cls));
             if (keep) fh2_filtered_transfers_[i].push_back(transfer);
           }
         }
