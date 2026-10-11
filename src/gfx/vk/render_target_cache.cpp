@@ -6649,8 +6649,6 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   miss_reason = nullptr;
   const auto& control = resolve_info.rb_copy_control;
   bool is_depth = control.copy_src_select >= xenos::kMaxColorRenderTargets;
-  // Depth direct resolves broke shadows in the race (2026-10-10): only with
-  // FH2_DIRECT_RESOLVE=1 until fixed.
   // FH2_DIRECT_RESOLVE=5: color + float (scene) depth, no unorm24 (shadow maps).
   int direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1);
   if (is_depth && direct_mode != 1 && direct_mode != 5) {
