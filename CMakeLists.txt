@@ -73,16 +73,31 @@ endif()
 # analysis) and provides its own Vulkan backend in src/gfx.
 if(NOT WIN32)
     set(_rex_gfx ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/src/graphics)
+    file(GLOB _fh2_gfx_vk ${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/vk/*.cpp)
     add_library(rexgpu-fh2 SHARED
-        src/gfx/fh2_gfx.cpp
+        src/gfx/plugin.cpp
+        ${_fh2_gfx_vk}
         ${_rex_gfx}/flags.cpp
         ${_rex_gfx}/registers.cpp
         ${_rex_gfx}/register_file.cpp
         ${_rex_gfx}/graphics_system.cpp
         ${_rex_gfx}/command_processor.cpp
         ${_rex_gfx}/packet_disassembler.cpp
+        ${_rex_gfx}/primitive_processor.cpp
+        ${_rex_gfx}/shared_memory.cpp
+        ${_rex_gfx}/pipeline/render_target/cache.cpp
+        ${_rex_gfx}/pipeline/texture/cache.cpp
         ${_rex_gfx}/pipeline/shader/shader.cpp
         ${_rex_gfx}/pipeline/shader/interpreter.cpp
+        ${_rex_gfx}/pipeline/shader/translator.cpp
+        ${_rex_gfx}/pipeline/shader/translator_disasm.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_builder.cpp
+        ${_rex_gfx}/pipeline/shader/spirv.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_translator.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_translator_alu.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_translator_fetch.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_translator_memexport.cpp
+        ${_rex_gfx}/pipeline/shader/spirv_translator_rb.cpp
         ${_rex_gfx}/format/ucode.cpp
         ${_rex_gfx}/util/draw.cpp
         ${_rex_gfx}/util/draw_extent_estimator.cpp
@@ -92,10 +107,15 @@ if(NOT WIN32)
         VISIBILITY_INLINES_HIDDEN ON
         LIBRARY_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:forzahorizon2>)
     target_include_directories(rexgpu-fh2 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gfx/vk
+        ${_rex_gfx}
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/thirdparty/renderdoc
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk)
     target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable)
     target_link_options(rexgpu-fh2 PRIVATE -Wl,--no-undefined)
-    target_link_libraries(rexgpu-fh2 PRIVATE rexruntime xxHash::xxhash Vulkan::Headers)
+    target_compile_definitions(rexgpu-fh2 PRIVATE REX_HAS_VULKAN=1)
+    target_link_libraries(rexgpu-fh2 PRIVATE rexruntime xxHash::xxhash Vulkan::Headers
+        GPUOpen::VulkanMemoryAllocator glslang::SPIRV glslang MachineIndependent
+        GenericCodeGen OSDependent OGLCompiler)
     add_dependencies(forzahorizon2 rexgpu-fh2)
 endif()
