@@ -81,6 +81,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   struct Framebuffer {
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkExtent2D host_extent{};
+    // FH2 full-frame strips: render only the current strip's rows (dynamic
+    // rendering loads and stores the whole render area).
+    VkOffset2D fh2_render_area_offset{};
     Framebuffer() = default;
     Framebuffer(VkFramebuffer framebuffer, const VkExtent2D& host_extent)
         : framebuffer(framebuffer), host_extent(host_extent) {}
@@ -1004,6 +1007,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   };
   Fh2FullFrame fh2_ff_;
   bool Fh2FullFrameEnsureImages();
+  void Fh2FullFrameSetStripArea(uint32_t strip_y);
   void Fh2FullFrameDestroyImages();
   // Copies guest rows between a host render target and a full-frame image
   // (both directions), with the layout transitions.

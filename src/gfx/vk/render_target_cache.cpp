@@ -7554,6 +7554,14 @@ void VulkanRenderTargetCache::Fh2FullFrameCopyRows(uint32_t index, bool to_full_
       VK_PIPELINE_STAGE_TRANSFER_BIT, draw_stage, ff_access, draw_access, ff_layout, draw_layout);
 }
 
+void VulkanRenderTargetCache::Fh2FullFrameSetStripArea(uint32_t strip_y) {
+  strip_y = std::min(strip_y, fh2_ff_.height - 1);
+  uint32_t rows = std::min(fh2_ff_.strip_height, fh2_ff_.height - strip_y);
+  fh2_ff_.framebuffer.fh2_render_area_offset = {0, int32_t(strip_y * draw_resolution_scale_y())};
+  fh2_ff_.framebuffer.host_extent = {fh2_ff_.width * draw_resolution_scale_x(),
+                                     rows * draw_resolution_scale_y()};
+}
+
 bool VulkanRenderTargetCache::Fh2FullFrameTargetsChanged() const {
   RenderTarget* const* rts = last_update_accumulated_render_targets();
   if (rts[0] != fh2_ff_.targets[0] || rts[1] != fh2_ff_.targets[1]) {
@@ -7606,6 +7614,7 @@ bool VulkanRenderTargetCache::Fh2FullFrameBegin(uint32_t frame_width, uint32_t f
       Fh2FullFrameCopyRows(i, true, 0, y, std::min(strip_height, frame_height - y));
     }
   }
+  Fh2FullFrameSetStripArea(0);
   fh2_ff_.active = true;
   ++fh2::rtlog::g_counters.full_frame_passes;
   fh2::rtlog::Log("FULL-FRAME begin {}x{} strips of {}", frame_width, frame_height, strip_height);
@@ -7620,6 +7629,8 @@ void VulkanRenderTargetCache::Fh2FullFrameCopyStripToHost(uint32_t strip_y) {
   for (uint32_t i = 0; i < 2; ++i) {
     Fh2FullFrameCopyRows(i, false, 0, strip_y, rows);
   }
+  // The next strip follows.
+  Fh2FullFrameSetStripArea(strip_y + rows);
   fh2::rtlog::Log("FULL-FRAME strip rows {}..{} -> strip targets", strip_y, strip_y + rows);
 }
 

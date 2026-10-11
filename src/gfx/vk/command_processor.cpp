@@ -3210,8 +3210,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.pNext = nullptr;
     rendering_info.flags = 0;
-    rendering_info.renderArea.offset.x = 0;
-    rendering_info.renderArea.offset.y = 0;
+    rendering_info.renderArea.offset = framebuffer->fh2_render_area_offset;
     rendering_info.renderArea.extent = framebuffer->host_extent;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
@@ -3304,8 +3303,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.pNext = nullptr;
     rendering_info.flags = 0;
-    rendering_info.renderArea.offset.x = 0;
-    rendering_info.renderArea.offset.y = 0;
+    rendering_info.renderArea.offset = framebuffer->fh2_render_area_offset;
     rendering_info.renderArea.extent = framebuffer->host_extent;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
