@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -165,7 +166,28 @@ int TimedEnvInt(const char* name, int default_value) {
   return value;
 }
 
+// Live overrides set through the game's debug channel (env <NAME> <value>).
+namespace {
+std::mutex g_live_env_mutex;
+std::map<std::string, int> g_live_env;
+}  // namespace
+
+extern "C" __attribute__((visibility("default"))) void Fh2SetLiveEnv(const char* name, int value,
+                                                                      int clear) {
+  std::lock_guard<std::mutex> lock(g_live_env_mutex);
+  if (clear) {
+    g_live_env.erase(name);
+  } else {
+    g_live_env[name] = value;
+  }
+}
+
 int TimedEnvIntUncached(const char* name, int default_value) {
+  {
+    std::lock_guard<std::mutex> lock(g_live_env_mutex);
+    auto live = g_live_env.find(name);
+    if (live != g_live_env.end()) return live->second;
+  }
   struct Step {
     double from_seconds;
     int value;

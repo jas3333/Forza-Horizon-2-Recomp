@@ -1017,6 +1017,7 @@ extern "C" REX_FUNC(sub_82B72A90) {
 // /proc/self/mem, so unmapped or protected ranges just fail instead of
 // faulting. Feeds tools/extract_shaders.py: most of FH2's engine shaders
 // arrive from LZX-compressed archives and only exist decompressed in memory.
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <filesystem>
@@ -1529,6 +1530,7 @@ extern "C" REX_FUNC(sub_82686CC8) {
 //   poke <hex> <float>  write a float to a guest address
 //   watch <hex>         hardware write watchpoint on a guest address (logs writers)
 //   tod [hours]         set the game clock (e.g. tod 19.9), or log it
+//   env <NAME> <v|off>  live renderer switch (FH2_* settings)
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1605,6 +1607,21 @@ void CtlCommand(const std::string& line) {
     g_tod_set_seconds = hours * 3600.0f;
     REXLOG_INFO("[CTL] tod: clock set to {:02d}:{:02d}", int(hours) % 24,
                 int(hours * 60) % 60);
+  } else if (cmd == "env") {
+    // Live renderer switch: env FH2_DIRECT_RESOLVE 0 | env FH2_DIRECT_RESOLVE off
+    std::string name, v;
+    in >> name >> v;
+    using SetFn = void (*)(const char*, int, int);
+    // The GPU plugin is dlopen'ed (possibly RTLD_LOCAL): look it up by name.
+    void* plugin = dlopen("librexgpu-fh2.so", RTLD_NOW | RTLD_NOLOAD);
+    auto fn = reinterpret_cast<SetFn>(plugin ? dlsym(plugin, "Fh2SetLiveEnv")
+                                             : dlsym(RTLD_DEFAULT, "Fh2SetLiveEnv"));
+    if (!fn) {
+      REXLOG_INFO("[CTL] env: the renderer has no live switches (not the fh2 GPU plugin?)");
+      return;
+    }
+    fn(name.c_str(), std::atoi(v.c_str()), v == "off");
+    REXLOG_INFO("[CTL] env {} = {}", name, v);
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);
