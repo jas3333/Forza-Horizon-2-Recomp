@@ -67,3 +67,35 @@ if(NOT WIN32)
         COMMENT "Staging runtime and GPU plugin next to forzahorizon2")
     add_dependencies(forzahorizon2 forzahorizon2_stage_libs)
 endif()
+
+# FH2 native renderer plugin (librexgpu-fh2.so, --gpu_plugin=fh2). Reuses the
+# SDK's generic GPU layer (ring buffer, PM4 parsing, register file, shader
+# analysis) and provides its own Vulkan backend in src/gfx.
+if(NOT WIN32)
+    set(_rex_gfx ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/src/graphics)
+    add_library(rexgpu-fh2 SHARED
+        src/gfx/fh2_gfx.cpp
+        ${_rex_gfx}/flags.cpp
+        ${_rex_gfx}/registers.cpp
+        ${_rex_gfx}/register_file.cpp
+        ${_rex_gfx}/graphics_system.cpp
+        ${_rex_gfx}/command_processor.cpp
+        ${_rex_gfx}/packet_disassembler.cpp
+        ${_rex_gfx}/pipeline/shader/shader.cpp
+        ${_rex_gfx}/pipeline/shader/interpreter.cpp
+        ${_rex_gfx}/format/ucode.cpp
+        ${_rex_gfx}/util/draw.cpp
+        ${_rex_gfx}/util/draw_extent_estimator.cpp
+    )
+    set_target_properties(rexgpu-fh2 PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        LIBRARY_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:forzahorizon2>)
+    target_include_directories(rexgpu-fh2 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/thirdparty/renderdoc
+        ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk)
+    target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable)
+    target_link_options(rexgpu-fh2 PRIVATE -Wl,--no-undefined)
+    target_link_libraries(rexgpu-fh2 PRIVATE rexruntime xxHash::xxhash Vulkan::Headers)
+    add_dependencies(forzahorizon2 rexgpu-fh2)
+endif()

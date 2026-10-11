@@ -107,7 +107,8 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics {
-extern std::atomic<uint64_t> g_shared_memory_upload_bytes;
+// Bytes of guest memory copied to the GPU by shared memory uploads (--log_fps).
+std::atomic<uint64_t> g_shared_memory_upload_bytes{0};
 // --log_fps: draw packets processed (per 5 s window).
 static std::atomic<uint64_t> fh2_draw_packets_{0};
 

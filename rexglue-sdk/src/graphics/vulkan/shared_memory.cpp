@@ -29,8 +29,8 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace rex::graphics {
-// Bytes of guest memory copied to the GPU by shared memory uploads (--log_fps).
-std::atomic<uint64_t> g_shared_memory_upload_bytes{0};
+// Defined in command_processor.cpp (shared by every backend).
+extern std::atomic<uint64_t> g_shared_memory_upload_bytes;
 }  // namespace rex::graphics
 
 namespace rex::graphics::vulkan {
