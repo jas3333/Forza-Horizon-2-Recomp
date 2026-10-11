@@ -41,6 +41,8 @@
 #include <rex/graphics/util/draw.h>
 #include "command_processor.h"
 #include "pipeline_cache.h"
+
+#include "fh2_rtlog.h"
 #include "shader.h"
 #include <rex/graphics/xenos.h>
 #include <rex/hash.h>
@@ -1236,6 +1238,7 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
 bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
                                                   VulkanShader::VulkanTranslation& translation) {
   VulkanShader& shader = static_cast<VulkanShader&>(translation.shader());
+  ++fh2::rtlog::g_counters.shaders_translated;
 
   // Perform translation.
   // If this fails the shader will be marked as invalid and ignored later.
@@ -3024,6 +3027,7 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
   // unsupported behavior that may be dangerous/crashing because pipelines can
   // be created from the disk storage.
 
+  ++fh2::rtlog::g_counters.pipelines_created;
   if (creation_arguments.pixel_shader) {
     REXGPU_INFO("Creating graphics pipeline state with VS {:016X}, PS {:016X}",
                 creation_arguments.vertex_shader->shader().ucode_data_hash(),

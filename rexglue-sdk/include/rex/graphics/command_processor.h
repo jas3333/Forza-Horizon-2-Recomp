@@ -36,6 +36,10 @@ class ByteStream;
 
 namespace rex::graphics {
 
+extern std::atomic<uint64_t> g_command_processor_idle_ns;
+extern std::atomic<uint64_t> g_command_processor_wait_reg_mem_ns;
+
+
 class GraphicsSystem;
 class Shader;
 

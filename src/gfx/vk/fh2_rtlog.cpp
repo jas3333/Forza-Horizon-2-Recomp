@@ -1,5 +1,7 @@
 #include "fh2_rtlog.h"
 
+#include <rex/graphics/command_processor.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <map>
@@ -180,8 +182,43 @@ const char* TransferModeName(TransferMode mode) {
   }
 }
 
+namespace {
+// Spike logger: any frame (swap to swap) over kSpikeMs is logged with what
+// happened during it.
+constexpr double kSpikeMs = 25.0;
+Counters g_frame_start_counters;
+uint64_t g_frame_start_idle_ns = 0, g_frame_start_wait_ns = 0;
+std::chrono::steady_clock::time_point g_last_swap;
+}  // namespace
+
 void OnSwap() {
   auto now = std::chrono::steady_clock::now();
+  {
+    uint64_t idle_ns = rex::graphics::g_command_processor_idle_ns.load(std::memory_order_relaxed);
+    uint64_t wait_ns =
+        rex::graphics::g_command_processor_wait_reg_mem_ns.load(std::memory_order_relaxed);
+    if (g_frame > 300) {
+      double frame_ms = std::chrono::duration<double, std::milli>(now - g_last_swap).count();
+      if (frame_ms > kSpikeMs) {
+        const Counters& c = g_counters;
+        const Counters& s = g_frame_start_counters;
+        REXGPU_INFO(
+            "[SPIKE] frame {}: {:.1f} ms -- command thread idle {:.1f} ms, WAIT_REG_MEM {:.1f} ms; "
+            "draws {}, texture loads {} ({:.2f} MB), resolves {}, transfers {}, new shaders {}, "
+            "new pipelines {}, GPU (completed) {:.1f} ms",
+            g_frame, frame_ms, double(idle_ns - g_frame_start_idle_ns) / 1e6,
+            double(wait_ns - g_frame_start_wait_ns) / 1e6, c.draws - s.draws,
+            c.tex_loads - s.tex_loads, double(c.tex_load_bytes - s.tex_load_bytes) / 1e6,
+            c.resolves - s.resolves, c.transfers - s.transfers,
+            c.shaders_translated - s.shaders_translated,
+            c.pipelines_created - s.pipelines_created, double(c.gpu_ns - s.gpu_ns) / 1e6);
+      }
+    }
+    g_last_swap = now;
+    g_frame_start_counters = g_counters;
+    g_frame_start_idle_ns = idle_ns;
+    g_frame_start_wait_ns = wait_ns;
+  }
   if (g_frame++ == 0) g_start = now;
   double seconds = std::chrono::duration<double>(now - g_start).count();
 

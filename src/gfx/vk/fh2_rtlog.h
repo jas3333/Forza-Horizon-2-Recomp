@@ -53,6 +53,8 @@ struct Counters {
   uint64_t transfers_skipped = 0;   // transfers dropped (nothing written since)
   uint64_t transfers_deferred = 0;  // transfers skipped as nothing read the target yet
   uint64_t transfers_cleared = 0;   // copy-backs replaced by depth clears
+  uint64_t shaders_translated = 0;
+  uint64_t pipelines_created = 0;
   uint64_t transfers_materialized = 0;  // deferred copies made real later
   uint64_t direct_resolve_misses = 0;  // color resolves that couldn't be
   uint64_t predicated_skips = 0;    // draws skipped by predicated tiling bin checks

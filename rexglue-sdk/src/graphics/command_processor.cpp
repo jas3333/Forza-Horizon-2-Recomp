@@ -107,6 +107,12 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics {
+
+// Time the command processor spent with nothing to do / in WAIT_REG_MEM
+// sleeps (for backends' per-frame diagnostics).
+std::atomic<uint64_t> g_command_processor_idle_ns{0};
+std::atomic<uint64_t> g_command_processor_wait_reg_mem_ns{0};
+
 // Bytes of guest memory copied to the GPU by shared memory uploads (--log_fps).
 std::atomic<uint64_t> g_shared_memory_upload_bytes{0};
 // --log_fps: draw packets processed (per 5 s window).
@@ -266,6 +272,7 @@ void CommandProcessor::WorkerThreadMain() {
       // We've run out of commands to execute.
       // We spin here waiting for new ones, as the overhead of waiting on our
       // event is too high.
+      auto idle_start = std::chrono::steady_clock::now();
       PrepareForWait();
       uint32_t loop_count = 0;
       do {
@@ -282,6 +289,11 @@ void CommandProcessor::WorkerThreadMain() {
       } while (worker_running_ && pending_fns_.empty() &&
                (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
       ReturnFromWait();
+      g_command_processor_idle_ns.fetch_add(
+          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - idle_start)
+                       .count()),
+          std::memory_order_relaxed);
       if (!worker_running_ || !pending_fns_.empty()) {
         continue;
       }
@@ -1168,6 +1180,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
     if (!matched) {
       // Wait.
       if (wait >= 0x100) {
+        auto wait_start = std::chrono::steady_clock::now();
         PrepareForWait();
         if (!REXCVAR_GET(vsync)) {
           // User wants it fast and dangerous.
@@ -1177,6 +1190,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         }
         rex::thread::SyncMemory();
         ReturnFromWait();
+        g_command_processor_wait_reg_mem_ns.fetch_add(
+            uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now() - wait_start)
+                         .count()),
+            std::memory_order_relaxed);
 
         if (!worker_running_) {
           // Short-circuited exit.
