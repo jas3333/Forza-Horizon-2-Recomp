@@ -228,6 +228,8 @@ TransferMode CurrentTransferMode() {
   for (const TransferModeStep& step : g_transfer_steps) {
     if (seconds >= step.from_seconds) mode = step.mode;
   }
+  // Live override (debug channel: env FH2_TRANSFER_ALL 1).
+  if (TimedEnvInt("FH2_TRANSFER_ALL", 0) == 1) mode = TransferMode::kAll;
   return mode;
 }
 
