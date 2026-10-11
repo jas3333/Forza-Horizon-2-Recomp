@@ -210,7 +210,8 @@ VulkanRenderTargetCache::VulkanRenderTargetCache(const RegisterFile& register_fi
                                                  uint32_t draw_resolution_scale_y,
                                                  VulkanCommandProcessor& command_processor)
     : RenderTargetCache(register_file, memory, draw_resolution_scale_x, draw_resolution_scale_y),
-      command_processor_(command_processor) {}
+      command_processor_(command_processor),
+      fh2_interpreter_(register_file, memory) {}
 
 VulkanRenderTargetCache::~VulkanRenderTargetCache() {
   Shutdown(true);
@@ -1675,7 +1676,11 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       }
       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
                                        depth_and_color_render_targets, transfers);
-      Fh2MarkDrawWritten(depth_and_color_render_targets);
+      Fh2PerformPendingDepthClears();
+      Fh2MarkDrawWritten(depth_and_color_render_targets,
+                         Fh2ClearDrawHostDepth(vertex_shader, normalized_depth_control,
+                                               normalized_color_mask,
+                                               depth_and_color_render_targets[0]));
 
       if (depth_and_color_render_targets[0]) {
         render_pass_key.depth_and_color_used |= 1 << 0;
@@ -5574,7 +5579,10 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       std::memset(&resolve_clear_attachment.clearValue, 0,
                   sizeof(resolve_clear_attachment.clearValue));
       uint64_t clear_value = render_target_resolve_clear_values[i];
-      if (dest_rt_key.is_depth) {
+      if (dest_rt_key.is_depth && fh2_depth_only_clear_) {
+        resolve_clear_attachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        resolve_clear_attachment.clearValue.depthStencil.depth = fh2_depth_only_clear_value_;
+      } else if (dest_rt_key.is_depth) {
         resolve_clear_attachment.aspectMask =
             VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
         uint32_t depth_guest_clear_value = (uint32_t(clear_value) >> 8) & 0xFFFFFF;
@@ -6965,10 +6973,45 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
         // Never diverged since the copy: only the never-copied parts remain.
         source->fh2_dirty_y0 = source->fh2_dirty_y1 = 0;
       }
+      RenderTargetKey source_key = source->key();
+      // Rows written only by clear draws with one depth: a depth-only clear of
+      // the same rectangle on the destination replaces copying them back.
+      bool clear_instead = false;
+      if (i == 0 && fh2::rtlog::TimedEnvInt("FH2_CLEAR_INSTEAD_OF_TRANSFER", 1) &&
+          source->fh2_dirty_by_clear && source->fh2_dirty_y0 < source->fh2_dirty_y1 &&
+          source->fh2_dirty_y1 != VulkanRenderTarget::kFh2AllRows &&
+          source->fh2_dirty_x1 != VulkanRenderTarget::kFh2AllRows && source_key.is_depth &&
+          dest->key().is_depth && source_key.base_tiles == dest->key().base_tiles &&
+          source_key.GetPitchTiles() == dest->key().GetPitchTiles()) {
+        auto factors = [](xenos::MsaaSamples msaa) {
+          return std::make_pair(msaa >= xenos::MsaaSamples::k4X ? 2u : 1u,
+                                msaa >= xenos::MsaaSamples::k2X ? 2u : 1u);
+        };
+        auto [sxf, syf] = factors(source_key.msaa_samples);
+        auto [dxf, dyf] = factors(dest->key().msaa_samples);
+        uint32_t sx0 = source->fh2_dirty_x0 * sxf, sx1 = source->fh2_dirty_x1 * sxf;
+        uint32_t sy0 = source->fh2_dirty_y0 * syf, sy1 = source->fh2_dirty_y1 * syf;
+        if (sx0 % dxf == 0 && sx1 % dxf == 0 && sy0 % dyf == 0 && sy1 % dyf == 0) {
+          clear_instead = true;
+          bool already_pending = false;
+          for (const Fh2PendingDepthClear& pending : fh2_pending_depth_clears_) {
+            already_pending |= pending.render_target == dest;
+          }
+          if (!already_pending) {
+            Fh2PendingDepthClear pending;
+            pending.render_target = dest;
+            pending.rectangle.x_pixels = sx0 / dxf;
+            pending.rectangle.y_pixels = sy0 / dyf;
+            pending.rectangle.width_pixels = (sx1 - sx0) / dxf;
+            pending.rectangle.height_pixels = (sy1 - sy0) / dyf;
+            pending.host_depth = source->fh2_clear_depth;
+            fh2_pending_depth_clears_.push_back(pending);
+          }
+        }
+      }
       // Source rows -> EDRAM tiles (absolute, possibly wrapping). Only the
       // parts of the transfer where the source is a known copy of the
       // destination can be narrowed to those tiles; the rest is copied fully.
-      RenderTargetKey source_key = source->key();
       uint32_t pitch = source_key.GetPitchTiles();
       uint32_t tile_height = Fh2TileHeightPixels(source_key.msaa_samples);
       uint32_t row_first = source->fh2_dirty_y0 / tile_height;
@@ -6998,6 +7041,10 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
       for (const auto& piece : pieces_unknown) {
         narrowed.emplace_back(piece.first, piece.second, transfer.source,
                               transfer.host_depth_source);
+      }
+      if (clear_instead) {
+        ++counters.transfers_cleared;
+        pieces_known.clear();
       }
       for (const auto& piece : pieces_known) {
         for (int64_t shift : {int64_t(0), -int64_t(xenos::kEdramTileCount)}) {
@@ -7033,6 +7080,7 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
       dest->fh2_copied_from_gen = only_source->fh2_gen;
       dest->fh2_dirty_y0 = 0;
       dest->fh2_dirty_y1 = 0;
+      dest->fh2_dirty_by_clear = false;
       dest->fh2_copied_ranges = std::move(requested_ranges);
     } else {
       dest->Fh2ForgetProvenance();
@@ -7040,12 +7088,14 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
   }
 }
 
-void VulkanRenderTargetCache::Fh2MarkDrawWritten(RenderTarget* const* render_targets) {
+void VulkanRenderTargetCache::Fh2MarkDrawWritten(RenderTarget* const* render_targets,
+                                                 const std::optional<float>& clear_depth) {
   const RegisterFile& regs = register_file();
   // Rows the draw can touch: viewport and scissor, conservatively. Window
   // offsets make this harder to reason about -- treat as everything.
   auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
   uint32_t y0 = 0, y1 = VulkanRenderTarget::kFh2AllRows;
+  uint32_t x0 = 0, x1 = VulkanRenderTarget::kFh2AllRows;
   if (!window_offset.window_x_offset && !window_offset.window_y_offset) {
     auto tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
     auto br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
@@ -7064,10 +7114,25 @@ void VulkanRenderTargetCache::Fh2MarkDrawWritten(RenderTarget* const* render_tar
     }
     y0 = top;
     y1 = std::max(top, bottom);
+    // Columns likewise.
+    uint32_t right = std::min(uint32_t(br.br_x), uint32_t(screen_br.br_x));
+    uint32_t left = uint32_t(tl.tl_x);
+    float vp_x_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
+    float vp_x_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE));
+    if (vte.vport_x_offset_ena && vte.vport_x_scale_ena && std::isfinite(vp_x_offset) &&
+        std::isfinite(vp_x_scale)) {
+      float vp_left = std::floor(vp_x_offset - vp_x_scale) - 1.0f;
+      float vp_right = std::ceil(vp_x_offset + vp_x_scale) + 1.0f;
+      left = std::max(left, uint32_t(std::max(0.0f, vp_left)));
+      right = std::min(right, uint32_t(std::max(0.0f, vp_right)));
+    }
+    x0 = left;
+    x1 = std::max(left, right);
   }
   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
     if (render_targets[i]) {
-      static_cast<VulkanRenderTarget*>(render_targets[i])->Fh2MarkWritten(y0, y1);
+      static_cast<VulkanRenderTarget*>(render_targets[i])
+          ->Fh2MarkWritten(x0, x1, y0, y1, i == 0 ? clear_depth : std::nullopt);
     }
   }
 }
@@ -7206,9 +7271,108 @@ void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
   }
   depth->fh2_dirty_y0 = 0;
   depth->fh2_dirty_y1 = 0;
+  depth->fh2_dirty_by_clear = false;
   fh2::rtlog::g_counters.transfers_deferred += depth_transfers.size();
   fh2::rtlog::Log("    deferred {} transfers into depth", depth_transfers.size());
   depth_transfers.clear();
+}
+
+
+// ---------------------------------------------------------------------------
+// FH2 clear draws
+
+namespace {
+class Fh2PositionSink : public ShaderInterpreter::ExportSink {
+ public:
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    if (export_register == ucode::ExportRegister::kVSPosition) {
+      if (value_mask & 0b0100) z = value[2];
+      if (value_mask & 0b1000) w = value[3];
+    }
+  }
+  std::optional<float> z, w;
+};
+}  // namespace
+
+std::optional<float> VulkanRenderTargetCache::Fh2ClearDrawHostDepth(
+    const Shader& vertex_shader, reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask, RenderTarget* depth_render_target) {
+  if (!depth_render_target || !normalized_depth_control.z_enable ||
+      !normalized_depth_control.z_write_enable ||
+      normalized_depth_control.zfunc != xenos::CompareFunction::kAlways ||
+      normalized_depth_control.stencil_enable || normalized_color_mask) {
+    return std::nullopt;
+  }
+  const RegisterFile& regs = register_file();
+  auto initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (initiator.source_select != xenos::SourceSelect::kAutoIndex || !initiator.num_indices ||
+      initiator.num_indices > 6 || !vertex_shader.is_ucode_analyzed() ||
+      !ShaderInterpreter::CanInterpretShader(vertex_shader)) {
+    return std::nullopt;
+  }
+  uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+  uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+  uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  fh2_interpreter_.SetShader(vertex_shader);
+  Fh2PositionSink sink;
+  fh2_interpreter_.SetExportSink(&sink);
+  std::optional<float> depth;
+  for (uint32_t i = 0; i < initiator.num_indices; ++i) {
+    uint32_t vertex_index = std::min(max_index, std::max(min_index, (i + index_offset) & 0xFFFFFF));
+    sink.z.reset();
+    sink.w.reset();
+    fh2_interpreter_.temp_registers()[0] = float(vertex_index);
+    fh2_interpreter_.Execute();
+    if (!sink.z.has_value()) {
+      depth.reset();
+      break;
+    }
+    float z = sink.z.value();
+    if (!vte.vtx_z_fmt) {
+      if (!sink.w.has_value() || sink.w.value() == 0.0f) {
+        depth.reset();
+        break;
+      }
+      z /= sink.w.value();
+    }
+    if (vte.vport_z_scale_ena) z *= regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZSCALE);
+    if (vte.vport_z_offset_ena) z += regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET);
+    if (!std::isfinite(z) || (depth.has_value() && depth.value() != z)) {
+      depth.reset();
+      break;
+    }
+    depth = z;
+  }
+  fh2_interpreter_.SetExportSink(nullptr);
+  if (!depth.has_value()) {
+    return std::nullopt;
+  }
+  // Host depth: D24S8 as is ([0, 1]), D24FS8 remapped from [0, 2) to [0, 1).
+  float z = depth.value();
+  if (depth_render_target->key().GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8) {
+    return std::clamp(z, 0.0f, 2.0f) * 0.5f;
+  }
+  return std::clamp(z, 0.0f, 1.0f);
+}
+
+void VulkanRenderTargetCache::Fh2PerformPendingDepthClears() {
+  for (const Fh2PendingDepthClear& pending : fh2_pending_depth_clears_) {
+    fh2::rtlog::Log("    depth clear instead of transfer: {} rect ({},{}) {}x{} depth {}",
+                    Fh2DescribeRT(pending.render_target), pending.rectangle.x_pixels,
+                    pending.rectangle.y_pixels, pending.rectangle.width_pixels,
+                    pending.rectangle.height_pixels, pending.host_depth);
+    fh2_depth_only_clear_ = true;
+    fh2_depth_only_clear_value_ = pending.host_depth;
+    RenderTarget* targets[1] = {pending.render_target};
+    std::vector<Transfer> no_transfers[1];
+    uint64_t unused_clear_value = 0;
+    PerformTransfersAndResolveClears(1, targets, no_transfers, &unused_clear_value,
+                                     &pending.rectangle);
+    fh2_depth_only_clear_ = false;
+  }
+  fh2_pending_depth_clears_.clear();
 }
 
 }  // namespace rex::graphics::fh2vk
