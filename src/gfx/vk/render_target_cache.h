@@ -376,6 +376,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     // EDRAM tile ranges [first, second) on which the copy was made (only there
     // the contents are known to match the source's).
     std::vector<std::pair<uint32_t, uint32_t>> fh2_copied_ranges;
+    // Deferred ("virtual") copy: the transfers that would have made this a
+    // copy of its source were skipped, as nothing read it yet. Its contents
+    // outside the dirty rows are garbage until materialized. The ownership
+    // tracking guarantees the source still holds that data while this target
+    // owns the tiles.
+    bool fh2_virtual = false;
+    std::vector<Transfer> fh2_deferred;
     void Fh2MarkWritten(uint32_t y0, uint32_t y1) {
       ++fh2_gen;
       if (y0 >= y1) return;
@@ -946,6 +953,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // VulkanRenderTarget::fh2_copied_from_id), and updates provenance.
   void Fh2NarrowTransfers(RenderTarget* const* render_targets, std::vector<Transfer>* transfers);
   void Fh2MarkDrawWritten(RenderTarget* const* render_targets);
+  // Deferred transfers: skips copies into a depth target that the draw
+  // doesn't read, materializing them only when something reads the target.
+  void Fh2DeferAndMaterialize(RenderTarget* const* render_targets, std::vector<Transfer>* transfers,
+                              reg::RB_DEPTHCONTROL normalized_depth_control);
+  void Fh2Materialize(VulkanRenderTarget* render_target, const char* reason);
   std::vector<Transfer> fh2_narrowed_transfers_[1 + xenos::kMaxColorRenderTargets];
   std::vector<VulkanTextureCache::Fh2ResolveTarget> fh2_resolve_targets_;
   std::vector<Transfer> fh2_filtered_transfers_[1 + xenos::kMaxColorRenderTargets];

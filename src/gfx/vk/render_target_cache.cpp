@@ -1408,7 +1408,9 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
               resolve_info.rb_color_clear | (uint64_t(resolve_info.rb_color_clear_lo) << 32);
           for (RenderTarget* clear_render_target : clear_render_targets) {
             if (clear_render_target) {
-              static_cast<VulkanRenderTarget*>(clear_render_target)->Fh2ForgetProvenance();
+              auto* clear_vulkan_rt = static_cast<VulkanRenderTarget*>(clear_render_target);
+              Fh2Materialize(clear_vulkan_rt, "resolve clear");
+              clear_vulkan_rt->Fh2ForgetProvenance();
             }
           }
           PerformTransfersAndResolveClears(2, clear_render_targets, clear_transfers_, clear_values,
@@ -1565,9 +1567,14 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
         }
         transfers = fh2_filtered_transfers_;
       }
-      if (fh2::rtlog::TimedEnvInt("FH2_NARROW_TRANSFERS", 0)) {
+      bool fh2_defer = fh2::rtlog::TimedEnvInt("FH2_DEFER_TRANSFERS", 1) != 0;
+      if (fh2_defer || fh2::rtlog::TimedEnvInt("FH2_NARROW_TRANSFERS", 0)) {
         for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
           fh2_narrowed_transfers_[i] = transfers[i];
+        }
+        if (fh2_defer) {
+          Fh2DeferAndMaterialize(depth_and_color_render_targets, fh2_narrowed_transfers_,
+                                 normalized_depth_control);
         }
         Fh2NarrowTransfers(depth_and_color_render_targets, fh2_narrowed_transfers_);
         transfers = fh2_narrowed_transfers_;
@@ -6225,6 +6232,9 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
     return true;
   }
   ++fh2::rtlog::g_counters.dumps;
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    Fh2Materialize(static_cast<VulkanRenderTarget*>(rectangle.render_target), "dump");
+  }
   command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kDump);
 
   // Clear previously set temporary indices.
@@ -6749,8 +6759,16 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
       }
     }
     list = std::move(narrowed);
-    // The destination now matches its (single) source.
-    if (only_source) {
+    // The destination now matches its (single) source -- unless the source is
+    // a deferred copy of the destination (a copy-back of its dirty rows): then
+    // the destination is the real one, and the source a (virtual) copy of it.
+    if (only_source && only_source->fh2_virtual) {
+      dest->Fh2ForgetProvenance();
+      only_source->fh2_copied_from_id = dest->fh2_id;
+      only_source->fh2_copied_from_gen = dest->fh2_gen;
+      only_source->fh2_dirty_y0 = 0;
+      only_source->fh2_dirty_y1 = 0;
+    } else if (only_source) {
       ++dest->fh2_gen;
       dest->fh2_copied_from_id = only_source->fh2_id;
       dest->fh2_copied_from_gen = only_source->fh2_gen;
@@ -6793,6 +6811,141 @@ void VulkanRenderTargetCache::Fh2MarkDrawWritten(RenderTarget* const* render_tar
       static_cast<VulkanRenderTarget*>(render_targets[i])->Fh2MarkWritten(y0, y1);
     }
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// FH2 deferred transfers
+
+void VulkanRenderTargetCache::Fh2Materialize(VulkanRenderTarget* render_target,
+                                             const char* reason) {
+  if (!render_target || !render_target->fh2_virtual) {
+    return;
+  }
+  render_target->fh2_virtual = false;
+  // The deferred transfers, minus the rows written since (those are real).
+  RenderTargetKey key = render_target->key();
+  uint32_t pitch = key.GetPitchTiles();
+  uint32_t tile_height = Fh2TileHeightPixels(key.msaa_samples);
+  int64_t dirty_start = 0, dirty_end = 0;
+  if (render_target->fh2_dirty_y0 < render_target->fh2_dirty_y1) {
+    if (render_target->fh2_dirty_y1 == VulkanRenderTarget::kFh2AllRows) {
+      render_target->fh2_deferred.clear();
+      return;
+    }
+    dirty_start = int64_t(key.base_tiles) +
+                  int64_t(render_target->fh2_dirty_y0 / tile_height) * pitch;
+    dirty_end = int64_t(key.base_tiles) +
+                int64_t((render_target->fh2_dirty_y1 + tile_height - 1) / tile_height) * pitch;
+  }
+  std::vector<Transfer> transfers;
+  for (const Transfer& transfer : render_target->fh2_deferred) {
+    std::vector<std::pair<int64_t, int64_t>> pieces{{transfer.start_tiles, transfer.end_tiles}};
+    for (int64_t shift : {int64_t(0), -int64_t(xenos::kEdramTileCount)}) {
+      std::vector<std::pair<int64_t, int64_t>> remaining;
+      for (const auto& piece : pieces) {
+        int64_t cut_start = std::max(piece.first, dirty_start + shift);
+        int64_t cut_end = std::min(piece.second, dirty_end + shift);
+        if (cut_start >= cut_end) {
+          remaining.push_back(piece);
+          continue;
+        }
+        if (piece.first < cut_start) remaining.emplace_back(piece.first, cut_start);
+        if (cut_end < piece.second) remaining.emplace_back(cut_end, piece.second);
+      }
+      pieces = std::move(remaining);
+    }
+    for (const auto& piece : pieces) {
+      transfers.emplace_back(uint32_t(piece.first), uint32_t(piece.second), transfer.source,
+                             transfer.host_depth_source);
+    }
+  }
+  render_target->fh2_deferred.clear();
+  ++fh2::rtlog::g_counters.transfers_materialized;
+  fh2::rtlog::Log("    materialize deferred copy ({}): {} transfer pieces", reason,
+                  transfers.size());
+  if (transfers.empty()) {
+    return;
+  }
+  RenderTarget* targets[1] = {render_target};
+  PerformTransfersAndResolveClears(1, targets, &transfers);
+}
+
+void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
+    RenderTarget* const* render_targets, std::vector<Transfer>* transfers,
+    reg::RB_DEPTHCONTROL normalized_depth_control) {
+  bool draw_reads_depth =
+      (normalized_depth_control.z_enable &&
+       normalized_depth_control.zfunc != xenos::CompareFunction::kAlways) ||
+      normalized_depth_control.stencil_enable;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    auto* dest = static_cast<VulkanRenderTarget*>(render_targets[i]);
+    if (!dest) {
+      continue;
+    }
+    // Reads of deferred sources by transfers into other targets.
+    for (const Transfer& transfer : transfers[i]) {
+      auto* source = static_cast<VulkanRenderTarget*>(transfer.source);
+      // A copy-back into the deferred copy's own source is narrowed to the
+      // real (dirty) rows -- if the provenance still holds; anything else
+      // reads the garbage and needs the copy made first.
+      if (source->fh2_virtual && !(source->fh2_copied_from_id == dest->fh2_id &&
+                                   source->fh2_copied_from_gen == dest->fh2_gen)) {
+        Fh2Materialize(source, "transfer to another target");
+      }
+    }
+    // A deferred target read by this draw (color: always assumed read).
+    if (dest->fh2_virtual && transfers[i].empty() && (i != 0 || draw_reads_depth)) {
+      Fh2Materialize(dest, "draw reads it");
+    }
+  }
+  // Defer the copy into the depth target if the draw doesn't read depth or
+  // stencil and everything comes from one real source.
+  auto* depth = static_cast<VulkanRenderTarget*>(render_targets[0]);
+  std::vector<Transfer>& depth_transfers = transfers[0];
+  if (!depth || depth_transfers.empty()) {
+    return;
+  }
+  auto* source = static_cast<VulkanRenderTarget*>(depth_transfers.front().source);
+  bool single_source = true;
+  for (const Transfer& transfer : depth_transfers) {
+    single_source &= transfer.source == source;
+  }
+  if (draw_reads_depth || !single_source || source->fh2_virtual ||
+      source->fh2_copied_from_id == depth->fh2_id) {
+    // (A copy-back from a deferred copy of this target is narrowed instead.)
+    Fh2Materialize(depth, "new transfers");
+    return;
+  }
+  if (depth->fh2_virtual) {
+    // Re-deferring: the new copy must cover the old deferred tiles.
+    bool covers = true;
+    for (const Transfer& old_transfer : depth->fh2_deferred) {
+      bool covered = false;
+      for (const Transfer& transfer : depth_transfers) {
+        covered |= transfer.start_tiles <= old_transfer.start_tiles &&
+                   transfer.end_tiles >= old_transfer.end_tiles;
+      }
+      covers &= covered;
+    }
+    if (!covers) {
+      Fh2Materialize(depth, "partial re-defer");
+    }
+  }
+  depth->fh2_virtual = true;
+  depth->fh2_deferred = depth_transfers;
+  ++depth->fh2_gen;
+  depth->fh2_copied_from_id = source->fh2_id;
+  depth->fh2_copied_from_gen = source->fh2_gen;
+  depth->fh2_copied_ranges.clear();
+  for (const Transfer& transfer : depth_transfers) {
+    depth->fh2_copied_ranges.emplace_back(transfer.start_tiles, transfer.end_tiles);
+  }
+  depth->fh2_dirty_y0 = 0;
+  depth->fh2_dirty_y1 = 0;
+  fh2::rtlog::g_counters.transfers_deferred += depth_transfers.size();
+  fh2::rtlog::Log("    deferred {} transfers into depth", depth_transfers.size());
+  depth_transfers.clear();
 }
 
 }  // namespace rex::graphics::fh2vk
