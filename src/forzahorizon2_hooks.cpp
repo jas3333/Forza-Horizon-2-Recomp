@@ -1531,6 +1531,7 @@ extern "C" REX_FUNC(sub_82686CC8) {
 //   watch <hex>         hardware write watchpoint on a guest address (logs writers)
 //   tod [hours]         set the game clock (e.g. tod 19.9), or log it
 //   env <NAME> <v|off>  live renderer switch (FH2_* settings)
+//   capture [n]         renderer frame log of the next n frames
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1622,6 +1623,18 @@ void CtlCommand(const std::string& line) {
     }
     fn(name.c_str(), std::atoi(v.c_str()), v == "off");
     REXLOG_INFO("[CTL] env {} = {}", name, v);
+  } else if (cmd == "capture") {
+    // Frame log of the next n frames (renderer [RTLOG] lines in play.log).
+    int n = 1;
+    in >> n;
+    void* plugin = dlopen("librexgpu-fh2.so", RTLD_NOW | RTLD_NOLOAD);
+    auto fn = reinterpret_cast<void (*)(int)>(plugin ? dlsym(plugin, "Fh2CaptureFrames") : nullptr);
+    if (!fn) {
+      REXLOG_INFO("[CTL] capture: not available (fh2 GPU plugin required)");
+      return;
+    }
+    fn(n);
+    REXLOG_INFO("[CTL] capture {} frame(s)", n);
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);

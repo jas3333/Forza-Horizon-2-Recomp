@@ -248,6 +248,13 @@ uint64_t g_frame_start_idle_ns = 0, g_frame_start_wait_ns = 0, g_frame_start_upl
 std::chrono::steady_clock::time_point g_last_swap;
 }  // namespace
 
+std::atomic<int> g_capture_request{0};
+
+// Debug channel: log the next n whole frames ([RTLOG]).
+extern "C" __attribute__((visibility("default"))) void Fh2CaptureFrames(int n) {
+  g_capture_request = n > 0 ? n : 1;
+}
+
 void OnSwap() {
   auto now = std::chrono::steady_clock::now();
   {
@@ -291,6 +298,12 @@ void OnSwap() {
       g_active = false;
       REXGPU_INFO("[RTLOG] ==== capture end ====");
     }
+  }
+  if (!g_active && g_capture_request.load() > 0) {
+    g_active = true;
+    g_frames_left = g_capture_request.exchange(0);
+    REXGPU_INFO("[RTLOG] ==== capture start (requested) at {:.1f} s (frame {}) ====", seconds,
+                g_frame);
   }
   if (!g_active && g_next_time < g_times.size() && seconds >= g_times[g_next_time]) {
     ++g_next_time;
