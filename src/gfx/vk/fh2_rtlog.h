@@ -87,6 +87,10 @@ void NoteResolveDest(uint32_t address, uint32_t length);
 // the memory under it must stay valid.
 void NoteMemoryResolve(uint32_t address, uint32_t length);
 bool OverlapsRecentMemoryResolve(uint32_t address, uint32_t length);
+// Non-texture readers of resolve output (vertex fetch): their ranges must keep
+// guest memory written. Logged once per range.
+void NoteNonTextureReader(uint32_t address, uint32_t length);
+bool OverlapsNonTextureReader(uint32_t address, uint32_t length);
 bool OverlapsResolveDest(uint32_t address, uint32_t length);
 
 template <typename... Args>

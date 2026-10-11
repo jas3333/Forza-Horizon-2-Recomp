@@ -59,6 +59,25 @@ bool OverlapsRecentMemoryResolve(uint32_t address, uint32_t length) {
   return false;
 }
 
+std::vector<std::pair<uint32_t, uint32_t>> g_non_texture_readers;
+
+void NoteNonTextureReader(uint32_t address, uint32_t length) {
+  uint32_t end = address + length;
+  for (const auto& range : g_non_texture_readers) {
+    if (range.first <= address && range.second >= end) return;
+  }
+  g_non_texture_readers.emplace_back(address, end);
+  REXGPU_INFO("[RTSTAT] vertex fetch reads resolve output: {:08X} len {:X}", address, length);
+}
+
+bool OverlapsNonTextureReader(uint32_t address, uint32_t length) {
+  uint32_t end = address + length;
+  for (const auto& range : g_non_texture_readers) {
+    if (range.first < end && range.second > address) return true;
+  }
+  return false;
+}
+
 void NoteResolveDest(uint32_t address, uint32_t length) {
   if (!length) return;
   uint32_t& end = g_resolve_dests[address];

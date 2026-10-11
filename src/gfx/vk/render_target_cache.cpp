@@ -1251,6 +1251,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           memory_resolves_nearby |= fh2::rtlog::OverlapsRecentMemoryResolve(
               target.texture->key().base_page << 12, target.texture->GetGuestBaseSize());
         }
+        memory_resolves_nearby |= fh2::rtlog::OverlapsNonTextureReader(
+            resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length);
         if (memory_resolves_nearby ||
             texture_cache.Fh2RangeHasOtherReaders(resolve_info.copy_dest_extent_start,
                                                   resolve_info.copy_dest_extent_length,

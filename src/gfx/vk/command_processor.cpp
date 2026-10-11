@@ -4060,6 +4060,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     if (vfetch_queued) {
       auto global_lock = rex::thread::global_critical_region::AcquireDirect();
       for (uint32_t i = 0; i < vfetch_queued; ++i) {
+        // FH2: vertex data read from resolve output keeps that resolve's
+        // guest memory write (the skip-memory guard).
+        if (fh2::rtlog::OverlapsResolveDest(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
+          fh2::rtlog::NoteNonTextureReader(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2);
+        }
         if (!shared_memory_->RequestRange(vfetch_addresses[i] << 2, vfetch_sizes[i] << 2)) {
           REXGPU_ERROR(
               "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
