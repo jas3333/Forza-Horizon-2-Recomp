@@ -1227,8 +1227,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
     bool fh2_memory_skipped = false;
     if (GetPath() == Path::kHostRenderTargets &&
         fh2::rtlog::TimedEnvInt("FH2_RESOLVE_SKIP_MEMORY", 0) &&
-        (fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4) == 1 ||
-         fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4) == 4)) {
+        (fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) == 1 ||
+         fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) == 4)) {
       uint32_t skip_dump_base, skip_dump_row_length_used, skip_dump_rows, skip_dump_pitch;
       resolve_info.GetCopyEdramTileSpan(skip_dump_base, skip_dump_row_length_used, skip_dump_rows,
                                         skip_dump_pitch);
@@ -1388,7 +1388,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           bool fh2_direct_ok = false;
           // FH2_DIRECT_RESOLVE: 0 off, 1 all, 2 only full-width (>= 1280)
           // resolves, 3 only smaller ones (bisecting), 4 color only.
-          int fh2_direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4);
+          int fh2_direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1);
           uint32_t fh2_resolve_width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
           bool fh2_resolve_is_depth =
               resolve_info.rb_copy_control.copy_src_select >= xenos::kMaxColorRenderTargets;
@@ -6652,7 +6652,7 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   // Depth direct resolves broke shadows in the race (2026-10-10): only with
   // FH2_DIRECT_RESOLVE=1 until fixed.
   // FH2_DIRECT_RESOLVE=5: color + float (scene) depth, no unorm24 (shadow maps).
-  int direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4);
+  int direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1);
   if (is_depth && direct_mode != 1 && direct_mode != 5) {
     return false;
   }
