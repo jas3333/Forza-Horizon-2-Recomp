@@ -573,6 +573,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   static constexpr uint32_t kFh2MarksPerSubmission = 2048;
   VkQueryPool fh2_mark_pool_ = VK_NULL_HANDLE;
   std::vector<uint8_t> fh2_mark_categories_[kFh2TimestampSlots];
+  std::vector<uint32_t> fh2_mark_passes_[kFh2TimestampSlots];  // per mark (pass profile)
+  uint32_t fh2_current_pass_ = UINT32_MAX;
   fh2::rtlog::GpuCategory fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
   bool fh2_log_next_draw_placement_ = false;
   // Inside a predicated-tiling strip (bin select not "all").
@@ -603,7 +605,27 @@ class VulkanCommandProcessor : public CommandProcessor {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fh2_mark_pool_,
         slot * kFh2MarksPerSubmission + uint32_t(categories.size()));
     categories.push_back(uint8_t(category));
+    fh2_mark_passes_[slot].resize(categories.size() - 1, UINT32_MAX);
+    fh2_mark_passes_[slot].push_back(fh2_current_pass_);
     fh2_current_category_ = category;
+  }
+  // Pass profile: a mark at the start of a render pass (same category).
+  void Fh2GpuPassMark(uint32_t pass_id) {
+    fh2_current_pass_ = pass_id;
+    if (pass_id == UINT32_MAX || !fh2_mark_pool_) {
+      return;
+    }
+    uint32_t slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots);
+    std::vector<uint8_t>& categories = fh2_mark_categories_[slot];
+    if (categories.size() >= kFh2MarksPerSubmission) {
+      return;
+    }
+    deferred_command_buffer_.CmdVkWriteTimestamp(
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fh2_mark_pool_,
+        slot * kFh2MarksPerSubmission + uint32_t(categories.size()));
+    categories.push_back(uint8_t(fh2_current_category_));
+    fh2_mark_passes_[slot].resize(categories.size() - 1, UINT32_MAX);
+    fh2_mark_passes_[slot].push_back(pass_id);
   }
 
  private:

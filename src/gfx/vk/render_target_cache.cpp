@@ -1607,6 +1607,12 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       }
     }
     counters.transfers += transfer_count;
+    if (changed && fh2::rtlog::g_pass_profile) {
+      command_processor_.Fh2GpuPassMark(fh2::rtlog::PassBegin(
+          fmt::format("depth {} color {} {} {} {}", Fh2DescribeRT(rts[0]), Fh2DescribeRT(rts[1]),
+                      Fh2DescribeRT(rts[2]), Fh2DescribeRT(rts[3]), Fh2DescribeRT(rts[4]))));
+    }
+    fh2::rtlog::PassAddDraw();
     if (changed) {
       ++counters.rt_changes;
       if (fh2::rtlog::g_active) {

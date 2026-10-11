@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <fmt/format.h>
 
@@ -100,6 +101,17 @@ bool OverlapsRecentMemoryResolve(uint32_t address, uint32_t length);
 void NoteNonTextureReader(uint32_t address, uint32_t length);
 bool OverlapsNonTextureReader(uint32_t address, uint32_t length);
 bool OverlapsResolveDest(uint32_t address, uint32_t length);
+
+// Per-pass GPU profile (ctl "passprof <frames>"): every render target change
+// starts a pass, keyed by its description and its occurrence in the frame;
+// GPU time between pass marks is summed per key and the top passes are
+// logged as [PASSPROF] lines a few frames after the profiled ones.
+extern bool g_pass_profile;
+// Starts a pass (returns its id for the GPU mark), or UINT32_MAX when not
+// profiling.
+uint32_t PassBegin(const std::string& description);
+void PassAddDraw();
+void PassAddGpuTime(uint32_t pass_id, uint64_t ns);
 
 template <typename... Args>
 inline void Log(fmt::format_string<Args...> format, Args&&... args) {

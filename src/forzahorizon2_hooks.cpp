@@ -1645,6 +1645,18 @@ void CtlCommand(const std::string& line) {
     }
     fn(name.c_str(), std::atoi(v.c_str()), v == "off");
     REXLOG_INFO("[CTL] env {} = {}", name, v);
+  } else if (cmd == "passprof") {
+    // GPU time per render pass over the next n frames ([PASSPROF] lines).
+    int n = 60;
+    in >> n;
+    void* plugin = dlopen("librexgpu-fh2.so", RTLD_NOW | RTLD_NOLOAD);
+    auto fn = reinterpret_cast<void (*)(int)>(plugin ? dlsym(plugin, "Fh2ProfilePasses") : nullptr);
+    if (!fn) {
+      REXLOG_INFO("[CTL] passprof: not available (fh2 GPU plugin required)");
+      return;
+    }
+    fn(n);
+    REXLOG_INFO("[CTL] passprof {} frame(s)", n);
   } else if (cmd == "capture") {
     // Frame log of the next n frames (renderer [RTLOG] lines in play.log).
     int n = 1;

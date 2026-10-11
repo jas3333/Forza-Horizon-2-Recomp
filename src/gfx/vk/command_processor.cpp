@@ -5420,6 +5420,7 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
                                   VK_QUERY_RESULT_64_BIT) != VK_SUCCESS ||
         times[1] < times[0]) {
       categories.clear();
+      fh2_mark_passes_[slot].clear();
       continue;
     }
     auto to_ns = [this](uint64_t ticks) { return uint64_t(double(ticks) * fh2_timestamp_period_ns_); };
@@ -5436,14 +5437,22 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
     // Interval i runs from mark i to mark i + 1 (or the end of the submission).
     uint64_t previous = times[0];
     uint8_t previous_category = uint8_t(fh2::rtlog::GpuCategory::kOther);
+    std::vector<uint32_t>& passes = fh2_mark_passes_[slot];
+    passes.resize(categories.size(), UINT32_MAX);
+    uint32_t previous_pass = UINT32_MAX;
     for (size_t i = 0; i <= categories.size(); ++i) {
       uint64_t time = i < categories.size() ? marks[i] : times[1];
       time = std::clamp(time, previous, times[1]);
       counters.gpu_category_ns[previous_category] += to_ns(time - previous);
+      fh2::rtlog::PassAddGpuTime(previous_pass, to_ns(time - previous));
       previous = time;
-      if (i < categories.size()) previous_category = categories[i];
+      if (i < categories.size()) {
+        previous_category = categories[i];
+        previous_pass = passes[i];
+      }
     }
     categories.clear();
+    passes.clear();
   }
 }
 

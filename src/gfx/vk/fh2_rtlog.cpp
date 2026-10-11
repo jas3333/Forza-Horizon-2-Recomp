@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <unordered_map>
 #include "fh2_rtlog.h"
 
 #include <rex/graphics/command_processor.h>
@@ -253,6 +255,98 @@ std::chrono::steady_clock::time_point g_last_swap;
 std::atomic<int> g_capture_request{0};
 
 // Debug channel: log the next n whole frames ([RTLOG]).
+bool g_pass_profile = false;
+namespace {
+struct PassStat {
+  std::string key;
+  uint64_t ns = 0;
+  uint64_t draws = 0;
+  uint64_t count = 0;
+};
+std::vector<PassStat> g_pass_stats;
+std::unordered_map<std::string, uint32_t> g_pass_index;
+std::unordered_map<std::string, uint32_t> g_pass_occurrence;  // this frame
+std::atomic<int> g_pass_request{0};
+int g_pass_frames_left = 0;
+int g_pass_frames = 0;
+int g_pass_report_in = 0;
+uint32_t g_current_pass = UINT32_MAX;
+}  // namespace
+
+uint32_t PassBegin(const std::string& description) {
+  if (!g_pass_profile) {
+    return UINT32_MAX;
+  }
+  uint32_t occurrence = g_pass_occurrence[description]++;
+  std::string key = fmt::format("{} #{}", description, occurrence);
+  auto it = g_pass_index.find(key);
+  uint32_t id;
+  if (it == g_pass_index.end()) {
+    id = uint32_t(g_pass_stats.size());
+    g_pass_stats.push_back({key});
+    g_pass_index.emplace(key, id);
+  } else {
+    id = it->second;
+  }
+  ++g_pass_stats[id].count;
+  g_current_pass = id;
+  return id;
+}
+
+void PassAddDraw() {
+  if (g_pass_profile && g_current_pass < g_pass_stats.size()) {
+    ++g_pass_stats[g_current_pass].draws;
+  }
+}
+
+void PassAddGpuTime(uint32_t pass_id, uint64_t ns) {
+  if (pass_id < g_pass_stats.size()) {
+    g_pass_stats[pass_id].ns += ns;
+  }
+}
+
+static void PassProfileOnSwap() {
+  g_pass_occurrence.clear();
+  if (g_pass_profile) {
+    if (--g_pass_frames_left <= 0) {
+      g_pass_profile = false;
+      g_current_pass = UINT32_MAX;
+      g_pass_report_in = 8;  // let the last submissions' timestamps arrive
+    }
+  } else if (g_pass_report_in > 0) {
+    if (--g_pass_report_in == 0) {
+      std::vector<const PassStat*> sorted;
+      uint64_t total = 0;
+      for (const PassStat& stat : g_pass_stats) {
+        sorted.push_back(&stat);
+        total += stat.ns;
+      }
+      std::sort(sorted.begin(), sorted.end(),
+                [](const PassStat* a, const PassStat* b) { return a->ns > b->ns; });
+      double frames = std::max(1, g_pass_frames);
+      REXGPU_INFO("[PASSPROF] {} frames, {} pass keys, GPU in passes {:.2f} ms/frame", g_pass_frames,
+                  g_pass_stats.size(), double(total) / 1e6 / frames);
+      for (size_t i = 0; i < sorted.size() && i < 30; ++i) {
+        const PassStat& s = *sorted[i];
+        REXGPU_INFO("[PASSPROF] {:6.3f} ms  {:5.0f} draws  (in {:.0f}% of frames)  {}",
+                    double(s.ns) / 1e6 / frames, double(s.draws) / frames,
+                    100.0 * double(s.count) / frames, s.key);
+      }
+      g_pass_stats.clear();
+      g_pass_index.clear();
+    }
+  } else if (g_pass_request.load() > 0) {
+    g_pass_frames = g_pass_frames_left = g_pass_request.exchange(0);
+    g_pass_stats.clear();
+    g_pass_index.clear();
+    g_pass_profile = true;
+  }
+}
+
+extern "C" __attribute__((visibility("default"))) void Fh2ProfilePasses(int n) {
+  g_pass_request = n > 0 ? n : 60;
+}
+
 extern "C" __attribute__((visibility("default"))) void Fh2CaptureFrames(int n) {
   g_capture_request = n > 0 ? n : 1;
 }
@@ -292,6 +386,7 @@ void OnSwap() {
     g_frame_start_upload = upload;
   }
   if (g_frame++ == 0) g_start = now;
+  PassProfileOnSwap();
   double seconds = std::chrono::duration<double>(now - g_start).count();
 
   if (g_active) {
