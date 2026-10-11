@@ -1077,20 +1077,32 @@ struct ShaderMemoryScanner {
 // ---------------------------------------------------------------------------
 // Debug: find and move the game clock (time of day).
 //
-//   F9   scan: snapshot every committed guest float in (0, 24], then every
+//   8  scan: snapshot every committed guest float in (0, 24], then every
 //        10 s for 60 s keep those that rise steadily at a constant rate
 //        (the time of day does; little else does). Logs [TODSCAN] candidates.
-//   F10  select the next candidate (logged).
-//   F11  move the selected value forward one hour (1.0 if it looks like
+//   0  select the next candidate (logged).
+//   9  move the selected value forward one hour (1.0 if it looks like
 //        hours, 1/24 if it looks like a 0..1 fraction of the day).
 //
-// FH2_TOD_ADDR=<hex> preselects an address (e.g. one found earlier), so F11
+// FH2_TOD_ADDR=<hex> preselects an address (e.g. one found earlier), so 9
 // works immediately without a scan.
 namespace {
 struct TodCandidate {
   uint32_t addr;
   float first, last, delta0;
 };
+// The master clock found by the targeted search (key 7): a float or double
+// holding the time of day in some unit; per_day = value of a full day.
+struct TodMaster {
+  uint32_t addr;
+  bool is_double;
+  double per_day;
+  bool is_int = false;
+};
+double TodMasterRead(rex::memory::Memory* mem, const TodMaster& m);
+std::vector<TodMaster> g_tod_masters;
+size_t g_tod_master_index = 0;
+bool g_tod_use_master = false;
 std::mutex g_tod_mutex;
 std::vector<TodCandidate> g_tod_candidates;
 std::atomic<bool> g_tod_scanning{false};
@@ -1102,6 +1114,17 @@ float TodRead(rex::memory::Memory* mem, uint32_t addr) {
   float f;
   std::memcpy(&f, &v, 4);
   return f;
+}
+double TodReadD(rex::memory::Memory* mem, uint32_t addr) {
+  uint64_t v = __builtin_bswap64(*mem->TranslateVirtual<uint64_t*>(addr));
+  double d;
+  std::memcpy(&d, &v, 8);
+  return d;
+}
+void TodWriteD(rex::memory::Memory* mem, uint32_t addr, double d) {
+  uint64_t v;
+  std::memcpy(&v, &d, 8);
+  *mem->TranslateVirtual<uint64_t*>(addr) = __builtin_bswap64(v);
 }
 void TodWrite(rex::memory::Memory* mem, uint32_t addr, float f) {
   uint32_t v;
@@ -1174,32 +1197,179 @@ void TodScan() {
   g_tod_candidates = std::move(cands);
   g_tod_index = 0;
   if (!g_tod_candidates.empty()) {
-    g_tod_selected = g_tod_candidates[0].addr;
-    REXLOG_INFO("[TODSCAN] selected #0 {:08X} (F10 next, F11 +1 hour)", g_tod_selected);
+    // Preselect the fastest riser: the time of day (as a fraction of a day)
+    // moved ~0.03 per minute, far more than the other survivors.
+    // Only values that look like a fraction of a day (<= 1) qualify.
+    size_t best = 0;
+    float best_rise = -1.0f;
+    for (size_t i = 0; i < g_tod_candidates.size(); ++i) {
+      const TodCandidate& c = g_tod_candidates[i];
+      if (c.last <= 1.0f && c.last - c.first > best_rise) {
+        best = i;
+        best_rise = c.last - c.first;
+      }
+    }
+    g_tod_index = best;
+    g_tod_selected = g_tod_candidates[best].addr;
+    REXLOG_INFO("[TODSCAN] selected #{} {:08X} (7 = find its master clock, 0 next, 9 +1 hour)",
+                best, g_tod_selected);
+  }
+  g_tod_scanning = false;
+}
+// Key 7: the selected candidate is a per-frame copy of the clock (fraction of
+// a day). Search for the same time in other units -- hours, minutes,
+// seconds, as float or double -- and keep values whose ratio to the copy
+// still holds two seconds later.
+double TodMasterRead(rex::memory::Memory* mem, const TodMaster& m) {
+  if (m.is_int) return double(int32_t(__builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(m.addr))));
+  return m.is_double ? TodReadD(mem, m.addr) : TodRead(mem, m.addr);
+}
+
+void TodFindMaster() {
+  auto* mem = rex::system::kernel_state()->memory();
+  // Every scan candidate that looks like the time as a fraction of a day
+  // (value <= 1, rising >= 0.01 per minute) is a possible per-frame copy.
+  std::vector<uint32_t> refs;
+  {
+    std::lock_guard<std::mutex> lock(g_tod_mutex);
+    for (const TodCandidate& c : g_tod_candidates) {
+      if (c.last <= 1.0f && c.last - c.first >= 0.01f) refs.push_back(c.addr);
+    }
+  }
+  if (refs.empty()) {
+    REXLOG_INFO("[TODSCAN] 7: no clock-like candidates (press 8 first)");
+    g_tod_scanning = false;
+    return;
+  }
+  static const double kScales[] = {1.0, 24.0, 1440.0, 86400.0, 86400000.0};
+  auto matches = [](double v, double ref, double scale) {
+    double want = ref * scale;
+    return std::isfinite(v) && want > 0 && std::fabs(v - want) <= want * 0.004 + 1e-6;
+  };
+  struct Pending {
+    TodMaster m;
+    uint32_t ref_addr;
+    double v0;
+  };
+  std::vector<Pending> found;
+  std::vector<double> ref_values;
+  for (uint32_t r : refs) ref_values.push_back(TodRead(mem, r));
+  TodForEachCommittedRegion(mem, [&](uint32_t base, uint32_t size) {
+    for (uint32_t off = 0; off + 4 <= size; off += 4) {
+      uint32_t a = base + off;
+      float f = TodRead(mem, a);
+      bool have_d = (off & 7) == 0 && off + 8 <= size;
+      double d = have_d ? TodReadD(mem, a) : 0.0;
+      int32_t iv = int32_t(__builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(a)));
+      for (size_t i = 0; i < refs.size(); ++i) {
+        if (a == refs[i]) continue;
+        for (double k : kScales) {
+          if (k != 1.0 && matches(f, ref_values[i], k))
+            found.push_back({{a, false, k}, refs[i], double(f)});
+          if (have_d && matches(d, ref_values[i], k)) found.push_back({{a, true, k}, refs[i], d});
+          if (k >= 1440.0 && matches(double(iv), ref_values[i], k))
+            found.push_back({{a, false, k, true}, refs[i], double(iv)});
+        }
+      }
+    }
+  });
+  REXLOG_INFO("[TODSCAN] master search over {} clock-like values: {} matches; rechecking in 2 s",
+              refs.size(), found.size());
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  std::vector<TodMaster> kept;
+  for (const Pending& p : found) {
+    double ref2 = TodRead(mem, p.ref_addr);
+    double v = TodMasterRead(mem, p.m);
+    bool dup = false;
+    for (const TodMaster& k : kept) dup |= k.addr == p.m.addr;
+    // It must have moved along with the clock copy (within 25%), not just
+    // still be close to it -- stored timestamps match once by coincidence.
+    double ref_index = 0;
+    for (size_t i = 0; i < refs.size(); ++i) if (refs[i] == p.ref_addr) ref_index = double(i);
+    double expected = (ref2 - ref_values[size_t(ref_index)]) * p.m.per_day;
+    double moved = v - p.v0;
+    if (!dup && expected > 0 && moved > expected * 0.75 && moved < expected * 1.25) {
+      kept.push_back(p.m);
+    }
+  }
+  for (size_t i = 0; i < kept.size() && i < 40; ++i) {
+    const TodMaster& m = kept[i];
+    double v = TodMasterRead(mem, m);
+    REXLOG_INFO("[TODSCAN] master #{} {:08X} {} {:.4f} ({} per day)", i, m.addr,
+                m.is_int ? "int32" : m.is_double ? "double" : "float", v, m.per_day);
+  }
+  std::lock_guard<std::mutex> lock(g_tod_mutex);
+  g_tod_masters = std::move(kept);
+  g_tod_master_index = 0;
+  g_tod_use_master = !g_tod_masters.empty();
+  if (g_tod_use_master) {
+    REXLOG_INFO("[TODSCAN] using master #0 {:08X} (9 = +1 hour, 0 = next master)",
+                g_tod_masters[0].addr);
+  } else {
+    REXLOG_INFO("[TODSCAN] no master clock found");
   }
   g_tod_scanning = false;
 }
 }  // namespace
 
 void InstallFh2DebugTools() {
+  REXLOG_INFO("[TODSCAN] game-clock keys: 8 = find clock, 7 = find master clock, 9 = +1 hour, 0 = next candidate");
   if (const char* env = std::getenv("FH2_TOD_ADDR")) {
     g_tod_selected = uint32_t(std::strtoul(env, nullptr, 16));
   }
-  rex::ui::RegisterBind("bind_fh2_tod_scan", "F9", "FH2: find the game clock (60 s)", [] {
-    if (g_tod_scanning.exchange(true)) return;
+  rex::ui::RegisterBind("bind_fh2_tod_scan", "8", "FH2: find the game clock (60 s)", [] {
+    if (g_tod_scanning.exchange(true)) {
+      REXLOG_INFO("[TODSCAN] 8 pressed: scan already running");
+      return;
+    }
     REXLOG_INFO("[TODSCAN] scanning for the game clock: keep driving in free roam for 60 s");
     std::thread(TodScan).detach();
   });
-  rex::ui::RegisterBind("bind_fh2_tod_next", "F10", "FH2: next game clock candidate", [] {
+  rex::ui::RegisterBind("bind_fh2_tod_master", "7", "FH2: find the master game clock", [] {
+    if (g_tod_scanning.exchange(true)) {
+      REXLOG_INFO("[TODSCAN] 7 pressed: a search is already running");
+      return;
+    }
+    REXLOG_INFO("[TODSCAN] 7 pressed: searching for the master clock (3 s)");
+    std::thread(TodFindMaster).detach();
+  });
+  rex::ui::RegisterBind("bind_fh2_tod_next", "0", "FH2: next game clock candidate", [] {
     std::lock_guard<std::mutex> lock(g_tod_mutex);
-    if (g_tod_candidates.empty()) return;
+    if (g_tod_use_master) {
+      g_tod_master_index = (g_tod_master_index + 1) % g_tod_masters.size();
+      REXLOG_INFO("[TODSCAN] using master #{} {:08X}", g_tod_master_index,
+                  g_tod_masters[g_tod_master_index].addr);
+      return;
+    }
+    if (g_tod_candidates.empty()) {
+      REXLOG_INFO("[TODSCAN] 0 pressed: no candidates yet (press 8 first)");
+      return;
+    }
     g_tod_index = (g_tod_index + 1) % g_tod_candidates.size();
     g_tod_selected = g_tod_candidates[g_tod_index].addr;
     REXLOG_INFO("[TODSCAN] selected #{} {:08X}", g_tod_index, g_tod_selected);
   });
-  rex::ui::RegisterBind("bind_fh2_tod_forward", "F11", "FH2: move the game clock +1 hour", [] {
-    if (!g_tod_selected) return;
+  rex::ui::RegisterBind("bind_fh2_tod_forward", "9", "FH2: move the game clock +1 hour", [] {
+    if (!g_tod_selected) {
+      REXLOG_INFO("[TODSCAN] 9 pressed: no clock selected yet (press 8 first)");
+      return;
+    }
     auto* mem = rex::system::kernel_state()->memory();
+    if (g_tod_use_master) {
+      std::lock_guard<std::mutex> lock(g_tod_mutex);
+      const TodMaster& m = g_tod_masters[g_tod_master_index];
+      double v = TodMasterRead(mem, m);
+      double nv = std::fmod(v + m.per_day / 24.0, m.per_day);
+      if (m.is_int) {
+        *mem->TranslateVirtual<uint32_t*>(m.addr) = __builtin_bswap32(uint32_t(int32_t(nv)));
+      } else if (m.is_double) {
+        TodWriteD(mem, m.addr, nv);
+      } else {
+        TodWrite(mem, m.addr, float(nv));
+      }
+      REXLOG_INFO("[TODSCAN] master {:08X}: {:.4f} -> {:.4f}", m.addr, v, nv);
+      return;
+    }
     float v = TodRead(mem, g_tod_selected);
     float step = v <= 1.0f ? 1.0f / 24.0f : 1.0f;
     float limit = v <= 1.0f ? 1.0f : 24.0f;
