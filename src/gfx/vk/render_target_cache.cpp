@@ -1401,6 +1401,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           clear_values[0] = resolve_info.rb_depth_clear;
           clear_values[1] =
               resolve_info.rb_color_clear | (uint64_t(resolve_info.rb_color_clear_lo) << 32);
+          for (RenderTarget* clear_render_target : clear_render_targets) {
+            if (clear_render_target) {
+              static_cast<VulkanRenderTarget*>(clear_render_target)->Fh2ForgetProvenance();
+            }
+          }
           PerformTransfersAndResolveClears(2, clear_render_targets, clear_transfers_, clear_values,
                                            &clear_rectangle);
         }
@@ -1555,8 +1560,23 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
         }
         transfers = fh2_filtered_transfers_;
       }
+      if (fh2::rtlog::TimedEnvInt("FH2_NARROW_TRANSFERS", 1)) {
+        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          fh2_narrowed_transfers_[i] = transfers[i];
+        }
+        Fh2NarrowTransfers(depth_and_color_render_targets, fh2_narrowed_transfers_);
+        transfers = fh2_narrowed_transfers_;
+      } else {
+        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          if (!transfers[i].empty() && depth_and_color_render_targets[i]) {
+            static_cast<VulkanRenderTarget*>(depth_and_color_render_targets[i])
+                ->Fh2ForgetProvenance();
+          }
+        }
+      }
       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
                                        depth_and_color_render_targets, transfers);
+      Fh2MarkDrawWritten(depth_and_color_render_targets);
 
       if (depth_and_color_render_targets[0]) {
         render_pass_key.depth_and_color_used |= 1 << 0;
@@ -2230,9 +2250,12 @@ RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(Ren
   }
   dfn.vkUpdateDescriptorSets(device, key.is_depth ? 2 : 1, descriptor_set_write, 0, nullptr);
 
-  return new VulkanRenderTarget(key, *this, image, memory, view_depth_color, view_depth_stencil,
+  auto* fh2_render_target = new VulkanRenderTarget(key, *this, image, memory, view_depth_color, view_depth_stencil,
                                 view_stencil, view_srgb, view_color_transfer_separate,
                                 descriptor_set_index_transfer_source);
+  fh2_render_target->fh2_id = fh2_next_render_target_id_++;
+  fh2_render_target->Fh2ForgetProvenance();
+  return fh2_render_target;
 }
 
 bool VulkanRenderTargetCache::IsHostDepthEncodingDifferent(
@@ -6623,6 +6646,147 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
     command_buffer.CmdVkDispatch((write.width + 7) / 8, (write.height + 7) / 8, 1);
     texture_cache.Fh2EndResolveWrite(texture);
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// FH2 transfer narrowing
+
+namespace {
+// Pixel rows per EDRAM tile row for a render target.
+uint32_t Fh2TileHeightPixels(xenos::MsaaSamples msaa) {
+  return xenos::kEdramTileHeightSamples >> (msaa >= xenos::MsaaSamples::k2X ? 1 : 0);
+}
+}  // namespace
+
+void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_targets,
+                                                 std::vector<Transfer>* transfers) {
+  auto& counters = fh2::rtlog::g_counters;
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    std::vector<Transfer>& list = transfers[i];
+    auto* dest = static_cast<VulkanRenderTarget*>(render_targets[i]);
+    if (!dest || list.empty()) {
+      continue;
+    }
+    // Provenance after the transfers: a copy of the single source on the
+    // requested ranges, if all the transfers come from one render target.
+    VulkanRenderTarget* only_source = static_cast<VulkanRenderTarget*>(list.front().source);
+    std::vector<std::pair<uint32_t, uint32_t>> requested_ranges;
+    for (const Transfer& transfer : list) {
+      if (transfer.source != only_source) only_source = nullptr;
+      requested_ranges.emplace_back(transfer.start_tiles, transfer.end_tiles);
+    }
+    std::vector<Transfer> narrowed;
+    narrowed.reserve(list.size());
+    for (const Transfer& transfer : list) {
+      auto* source = static_cast<VulkanRenderTarget*>(transfer.source);
+      bool provenance = source->fh2_copied_from_id == dest->fh2_id &&
+                        source->fh2_copied_from_gen == dest->fh2_gen;
+      if (!provenance || source->fh2_dirty_y1 == VulkanRenderTarget::kFh2AllRows) {
+        narrowed.push_back(transfer);
+        continue;
+      }
+      if (source->fh2_dirty_y0 >= source->fh2_dirty_y1) {
+        // Never diverged since the copy: only the never-copied parts remain.
+        source->fh2_dirty_y0 = source->fh2_dirty_y1 = 0;
+      }
+      // Source rows -> EDRAM tiles (absolute, possibly wrapping). Only the
+      // parts of the transfer where the source is a known copy of the
+      // destination can be narrowed to those tiles; the rest is copied fully.
+      RenderTargetKey source_key = source->key();
+      uint32_t pitch = source_key.GetPitchTiles();
+      uint32_t tile_height = Fh2TileHeightPixels(source_key.msaa_samples);
+      uint32_t row_first = source->fh2_dirty_y0 / tile_height;
+      uint32_t row_end = (source->fh2_dirty_y1 + tile_height - 1) / tile_height;
+      int64_t dirty_start = int64_t(source_key.base_tiles) + int64_t(row_first) * pitch;
+      int64_t dirty_end = int64_t(source_key.base_tiles) + int64_t(row_end) * pitch;
+      // Split [start, end) of the transfer into pieces inside / outside the
+      // copied ranges.
+      std::vector<std::pair<uint32_t, uint32_t>> pieces_known, pieces_unknown;
+      pieces_unknown.emplace_back(transfer.start_tiles, transfer.end_tiles);
+      for (const auto& copied : source->fh2_copied_ranges) {
+        std::vector<std::pair<uint32_t, uint32_t>> still_unknown;
+        for (const auto& piece : pieces_unknown) {
+          uint32_t start = std::max(piece.first, copied.first);
+          uint32_t end = std::min(piece.second, copied.second);
+          if (start >= end) {
+            still_unknown.push_back(piece);
+            continue;
+          }
+          pieces_known.emplace_back(start, end);
+          if (piece.first < start) still_unknown.emplace_back(piece.first, start);
+          if (end < piece.second) still_unknown.emplace_back(end, piece.second);
+        }
+        pieces_unknown = std::move(still_unknown);
+      }
+      bool changed = false;
+      for (const auto& piece : pieces_unknown) {
+        narrowed.emplace_back(piece.first, piece.second, transfer.source,
+                              transfer.host_depth_source);
+      }
+      for (const auto& piece : pieces_known) {
+        for (int64_t shift : {int64_t(0), -int64_t(xenos::kEdramTileCount)}) {
+          int64_t start = std::max<int64_t>(piece.first, dirty_start + shift);
+          int64_t end = std::min<int64_t>(piece.second, dirty_end + shift);
+          if (start < end) {
+            narrowed.emplace_back(uint32_t(start), uint32_t(end), transfer.source,
+                                  transfer.host_depth_source);
+          }
+          if (start > int64_t(piece.first) || end < int64_t(piece.second)) changed = true;
+        }
+      }
+      if (pieces_known.empty()) {
+        continue;
+      }
+      if (changed) {
+        ++counters.transfers_narrowed;
+      }
+    }
+    list = std::move(narrowed);
+    // The destination now matches its (single) source.
+    if (only_source) {
+      ++dest->fh2_gen;
+      dest->fh2_copied_from_id = only_source->fh2_id;
+      dest->fh2_copied_from_gen = only_source->fh2_gen;
+      dest->fh2_dirty_y0 = 0;
+      dest->fh2_dirty_y1 = 0;
+      dest->fh2_copied_ranges = std::move(requested_ranges);
+    } else {
+      dest->Fh2ForgetProvenance();
+    }
+  }
+}
+
+void VulkanRenderTargetCache::Fh2MarkDrawWritten(RenderTarget* const* render_targets) {
+  const RegisterFile& regs = register_file();
+  // Rows the draw can touch: viewport and scissor, conservatively. Window
+  // offsets make this harder to reason about -- treat as everything.
+  auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+  uint32_t y0 = 0, y1 = VulkanRenderTarget::kFh2AllRows;
+  if (!window_offset.window_x_offset && !window_offset.window_y_offset) {
+    auto tl = regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+    auto br = regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+    auto screen_br = regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
+    float vp_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
+    float vp_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE));
+    auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+    uint32_t bottom = std::min(uint32_t(br.br_y), uint32_t(screen_br.br_y));
+    uint32_t top = uint32_t(tl.tl_y);
+    if (vte.vport_y_offset_ena && vte.vport_y_scale_ena && std::isfinite(vp_offset) &&
+        std::isfinite(vp_scale)) {
+      float vp_top = std::floor(vp_offset - vp_scale) - 1.0f;
+      float vp_bottom = std::ceil(vp_offset + vp_scale) + 1.0f;
+      top = std::max(top, uint32_t(std::max(0.0f, vp_top)));
+      bottom = std::min(bottom, uint32_t(std::max(0.0f, vp_bottom)));
+    }
+    y0 = top;
+    y1 = std::max(top, bottom);
+  }
+  for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if (render_targets[i]) {
+      static_cast<VulkanRenderTarget*>(render_targets[i])->Fh2MarkWritten(y0, y1);
+    }
   }
 }
 

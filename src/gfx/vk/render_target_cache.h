@@ -361,6 +361,40 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     uint32_t temporary_sort_index() const { return temporary_sort_index_; }
     void SetTemporarySortIndex(uint32_t index) { temporary_sort_index_ = index; }
 
+    // FH2 transfer narrowing. Provenance: this target's contents equal those
+    // of render target fh2_copied_from_id at its generation
+    // fh2_copied_from_gen, except for the pixel rows [fh2_dirty_y0,
+    // fh2_dirty_y1) written since. A transfer back into that source then only
+    // needs those rows.
+    static constexpr uint32_t kFh2AllRows = UINT32_MAX;
+    uint64_t fh2_id = 0;
+    uint64_t fh2_gen = 0;
+    uint64_t fh2_copied_from_id = 0;
+    uint64_t fh2_copied_from_gen = 0;
+    uint32_t fh2_dirty_y0 = 0;
+    uint32_t fh2_dirty_y1 = 0;
+    // EDRAM tile ranges [first, second) on which the copy was made (only there
+    // the contents are known to match the source's).
+    std::vector<std::pair<uint32_t, uint32_t>> fh2_copied_ranges;
+    void Fh2MarkWritten(uint32_t y0, uint32_t y1) {
+      ++fh2_gen;
+      if (y0 >= y1) return;
+      if (fh2_dirty_y0 >= fh2_dirty_y1) {
+        fh2_dirty_y0 = y0;
+        fh2_dirty_y1 = y1;
+      } else {
+        fh2_dirty_y0 = std::min(fh2_dirty_y0, y0);
+        fh2_dirty_y1 = std::max(fh2_dirty_y1, y1);
+      }
+    }
+    void Fh2ForgetProvenance() {
+      ++fh2_gen;
+      fh2_copied_from_id = 0;
+      fh2_copied_ranges.clear();
+      fh2_dirty_y0 = 0;
+      fh2_dirty_y1 = kFh2AllRows;
+    }
+
    private:
     VulkanRenderTargetCache& render_target_cache_;
 
@@ -906,6 +940,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
   VkPipeline fh2_resolve_pipelines_[3][2] = {};
   bool fh2_resolve_pipelines_attempted_ = false;
+  uint64_t fh2_next_render_target_id_ = 1;
+  // Narrows the transfers into each bound render target to the rows the
+  // source wrote since it was copied from that target (see
+  // VulkanRenderTarget::fh2_copied_from_id), and updates provenance.
+  void Fh2NarrowTransfers(RenderTarget* const* render_targets, std::vector<Transfer>* transfers);
+  void Fh2MarkDrawWritten(RenderTarget* const* render_targets);
+  std::vector<Transfer> fh2_narrowed_transfers_[1 + xenos::kMaxColorRenderTargets];
   std::vector<VulkanTextureCache::Fh2ResolveTarget> fh2_resolve_targets_;
   std::vector<Transfer> fh2_filtered_transfers_[1 + xenos::kMaxColorRenderTargets];
 };
