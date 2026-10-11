@@ -3448,13 +3448,41 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
   }
   --it;
   uint32_t base = it->first;
-  // Tiled 32bpp: whole 32-row stripes are contiguous.
-  uint32_t stripe_bytes = dest_pitch_texels * 32 * 4;
+  // Find the 32x32-tile-aligned position whose tiled address is the
+  // destination (the resolve's base already includes the tiled offset of the
+  // tile-aligned part of its destination rectangle; tiled 32bpp).
   uint32_t offset = dest_address - base;
-  if (offset % stripe_bytes) {
-    return false;
+  uint32_t row_offset = 0, column_offset = 0;
+  {
+    auto cached = fh2_tiled_offset_positions_.find((uint64_t(dest_pitch_texels) << 32) | offset);
+    if (cached != fh2_tiled_offset_positions_.end()) {
+      column_offset = cached->second.first;
+      row_offset = cached->second.second;
+    } else {
+      bool found = offset == 0;
+      for (uint32_t y = 0; !found && y < 8192; y += 32) {
+        // Tiled offsets grow with y; stop once a row starts past the offset.
+        if (uint32_t(texture_util::GetTiledOffset2D(0, int32_t(y), dest_pitch_texels, 2)) >
+            offset) {
+          break;
+        }
+        for (uint32_t x = 0; x < dest_pitch_texels; x += 32) {
+          if (uint32_t(texture_util::GetTiledOffset2D(int32_t(x), int32_t(y), dest_pitch_texels,
+                                                      2)) == offset) {
+            column_offset = x;
+            row_offset = y;
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        return false;
+      }
+      fh2_tiled_offset_positions_.emplace((uint64_t(dest_pitch_texels) << 32) | offset,
+                                          std::make_pair(column_offset, row_offset));
+    }
   }
-  uint32_t row_offset = offset / stripe_bytes * 32;
   for (const TextureKey& key : it->second) {
     if (key.format != format || bool(key.scaled_resolve) != scaled ||
         key.pitch * 32 != dest_pitch_texels) {
@@ -3465,7 +3493,7 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
         dest_address >= base + texture->GetGuestBaseSize()) {
       continue;
     }
-    bool covers_all = row_offset == 0 && offset_x == 0 && offset_y == 0 &&
+    bool covers_all = row_offset == 0 && column_offset == 0 && offset_x == 0 && offset_y == 0 &&
                       width >= key.GetWidth() && height >= key.GetHeight();
     {
       // Revalidation after the write also marks the mips up to date, so
@@ -3481,7 +3509,7 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
     }
     Fh2ResolveTarget& target = out.emplace_back();
     target.texture = texture;
-    target.x = 0;
+    target.x = column_offset;
     target.y = row_offset;
     target.width = key.GetWidth();
     target.height = key.GetHeight();

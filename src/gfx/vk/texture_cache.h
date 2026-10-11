@@ -377,6 +377,8 @@ class VulkanTextureCache final : public TextureCache {
     TextureKey key;
   };
   std::vector<Fh2ResolveReader> fh2_resolve_readers_;
+  // (pitch << 32 | tiled byte offset) -> 32x32-aligned (x, y).
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> fh2_tiled_offset_positions_;
   VkDescriptorSetLayout fh2_storage_set_layout_ = VK_NULL_HANDLE;
   VkDescriptorPool fh2_storage_pool_ = VK_NULL_HANDLE;
   bool fh2_storage_format_supported_[64] = {};
