@@ -7557,6 +7557,10 @@ void VulkanRenderTargetCache::Fh2FullFrameCopyRows(uint32_t index, bool to_full_
 void VulkanRenderTargetCache::Fh2FullFrameSetStripArea(uint32_t strip_y) {
   strip_y = std::min(strip_y, fh2_ff_.height - 1);
   uint32_t rows = std::min(fh2_ff_.strip_height, fh2_ff_.height - strip_y);
+  if (fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0) == 2) {
+    // Dedup draws reach down to the bottom of the frame.
+    rows = fh2_ff_.height - strip_y;
+  }
   fh2_ff_.framebuffer.fh2_render_area_offset = {0, int32_t(strip_y * draw_resolution_scale_y())};
   fh2_ff_.framebuffer.host_extent = {fh2_ff_.width * draw_resolution_scale_x(),
                                      rows * draw_resolution_scale_y()};

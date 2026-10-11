@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -537,6 +538,14 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool fh2_log_next_draw_placement_ = false;
   // Inside a predicated-tiling strip (bin select not "all").
   bool fh2_bin_strip_ = false;
+  // Strip dedup (FH2_FULL_FRAME_STRIPS=2): content fingerprints of the
+  // non-blended draws already drawn full-frame in this tiled pass.
+  std::unordered_set<uint64_t> fh2_full_frame_drawn_;
+  uint64_t fh2_full_frame_pass_ = 0;
+  uint64_t Fh2DrawFingerprint(const Shader& vertex_shader, const Shader* pixel_shader,
+                              xenos::PrimitiveType prim_type, uint32_t index_count,
+                              const IndexBufferInfo* index_buffer_info) const;
+  bool Fh2DrawBlends() const;
 
  public:
   void Fh2AwaitIdle() { AwaitAllQueueOperationsCompletion(); }

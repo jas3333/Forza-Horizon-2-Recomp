@@ -86,14 +86,14 @@ class Fh2FullFrameRegisterOverride {
   // The window scissor is in screen space (the window offset moves it into
   // the strip target), so with the offset at 0 it selects the strip's rows of
   // the full frame. widen_scissor: the whole frame instead (with dedup).
-  void Arm(uint32_t width, uint32_t height, bool widen_scissor) {
+  void Arm(uint32_t width, uint32_t height, bool widen_scissor, uint32_t top) {
     saved_offset_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
     saved_tl_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL];
     saved_br_ = regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
     regs_.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET] = 0;
     if (widen_scissor) {
-      // Keep window_offset_disable (bit 31), scissor from (0, 0).
-      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] = saved_tl_ & 0x80000000u;
+      // Keep window_offset_disable (bit 31), scissor from (0, top).
+      regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] = (saved_tl_ & 0x80000000u) | (top << 16);
       regs_.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] =
           (saved_br_ & ~((0x3FFFu << 16) | 0x3FFFu)) | (height << 16) | width;
     }
@@ -3756,6 +3756,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     }
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
+  // FH2 strip dedup: a non-blended draw already drawn full-frame in an
+  // earlier strip of this tiled pass is skipped.
+  uint64_t fh2_draw_fingerprint = 0;
+  bool fh2_dedup_draw = false;
+  if (fh2_bin_strip_ && render_target_cache_->Fh2FullFrameActive() && !memexport_used_vertex &&
+      !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0) == 2 &&
+      !Fh2DrawBlends()) {
+    if (fh2_full_frame_pass_ != fh2::rtlog::g_counters.full_frame_passes) {
+      fh2_full_frame_pass_ = fh2::rtlog::g_counters.full_frame_passes;
+      fh2_full_frame_drawn_.clear();
+    }
+    fh2_draw_fingerprint =
+        Fh2DrawFingerprint(*vertex_shader, pixel_shader, prim_type, index_count, index_buffer_info);
+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    bool later_strip = window_offset.window_y_offset < 0;
+    if (later_strip && fh2_full_frame_drawn_.count(fh2_draw_fingerprint)) {
+      ++fh2::rtlog::g_counters.draws_deduped;
+      return true;
+    }
+    fh2_dedup_draw = true;
+  }
   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
 
   uint32_t ps_param_gen_pos = UINT32_MAX;
@@ -3947,8 +3968,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       }
     }
     if (render_target_cache_->Fh2FullFrameActive()) {
+      // Dedup draws cover their strip and everything below it (rows above
+      // were resolved already); others stay within their strip.
       fh2_full_frame_override.Arm(render_target_cache_->fh2_full_frame_width(),
-                                  render_target_cache_->fh2_full_frame_height(), false);
+                                  render_target_cache_->fh2_full_frame_height(), fh2_dedup_draw,
+                                  strip_y);
+      if (fh2_dedup_draw) {
+        fh2_full_frame_drawn_.insert(fh2_draw_fingerprint);
+      }
     }
   }
 
@@ -5145,6 +5172,67 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
   sample_counts->StencilFail_B = 0;
 }
 
+
+uint64_t VulkanCommandProcessor::Fh2DrawFingerprint(const Shader& vertex_shader,
+                                                   const Shader* pixel_shader,
+                                                   xenos::PrimitiveType prim_type,
+                                                   uint32_t index_count,
+                                                   const IndexBufferInfo* index_buffer_info) const {
+  const RegisterFile& regs = *register_file_;
+  XXH3_state_t state;
+  XXH3_64bits_reset(&state);
+  uint64_t shader_hashes[2] = {vertex_shader.ucode_data_hash(),
+                               pixel_shader ? pixel_shader->ucode_data_hash() : 0};
+  XXH3_64bits_update(&state, shader_hashes, sizeof(shader_hashes));
+  uint32_t geometry[4] = {index_count, uint32_t(prim_type),
+                          index_buffer_info ? index_buffer_info->guest_base : 0,
+                          regs[XE_GPU_REG_VGT_INDX_OFFSET]};
+  XXH3_64bits_update(&state, geometry, sizeof(geometry));
+  for (const auto& binding : vertex_shader.vertex_bindings()) {
+    XXH3_64bits_update(
+        &state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 2],
+        sizeof(uint32_t) * 2);
+  }
+  for (const Shader* stage_shader : {&vertex_shader, pixel_shader}) {
+    if (!stage_shader) continue;
+    for (const auto& binding : stage_shader->texture_bindings()) {
+      XXH3_64bits_update(
+          &state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6],
+          sizeof(uint32_t) * 6);
+    }
+    uint32_t constant_base = stage_shader == pixel_shader ? 256 : 0;
+    const auto& map = stage_shader->constant_register_map();
+    for (uint32_t word = 0; word < 4; ++word) {
+      uint64_t bits = map.float_bitmap[word];
+      while (bits) {
+        uint32_t constant = constant_base + word * 64 + uint32_t(__builtin_ctzll(bits));
+        bits &= bits - 1;
+        XXH3_64bits_update(&state,
+                           &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + constant * 4],
+                           sizeof(uint32_t) * 4);
+      }
+    }
+    XXH3_64bits_update(&state, map.bool_bitmap, sizeof(map.bool_bitmap));
+  }
+  // Bool / loop constants and the render state that decides what is written.
+  XXH3_64bits_update(&state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
+                     sizeof(uint32_t) * (8 + 32));
+  uint32_t state_regs[] = {regs[XE_GPU_REG_RB_DEPTHCONTROL], regs[XE_GPU_REG_RB_COLOR_MASK],
+                           regs[XE_GPU_REG_RB_BLENDCONTROL0], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
+                           regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_RB_COLORCONTROL]};
+  XXH3_64bits_update(&state, state_regs, sizeof(state_regs));
+  return XXH3_64bits_digest(&state);
+}
+
+bool VulkanCommandProcessor::Fh2DrawBlends() const {
+  auto blend = register_file_->Get<reg::RB_BLENDCONTROL>();
+  return !(blend.color_srcblend == xenos::BlendFactor::kOne &&
+           blend.color_destblend == xenos::BlendFactor::kZero &&
+           blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+           blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+           blend.alpha_destblend == xenos::BlendFactor::kZero &&
+           blend.alpha_comb_fcn == xenos::BlendOp::kAdd);
+}
 
 void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
   switch (event) {

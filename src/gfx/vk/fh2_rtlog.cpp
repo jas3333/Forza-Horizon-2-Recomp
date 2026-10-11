@@ -263,7 +263,7 @@ void OnSwap() {
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
         "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}, "
         "direct resolves {:.1f} (misses {:.1f}, memory skipped {:.1f}, kept {:.1f}), transfers narrowed {:.1f} skipped {:.1f} "
-        "deferred {:.1f} materialized {:.1f} cleared {:.1f}",
+        "deferred {:.1f} materialized {:.1f} cleared {:.1f}, deduped draws {:.1f}",
         TransferModeName(CurrentTransferMode()), per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
         per(c.resolve_bytes, l.resolve_bytes) / 1e6, per(c.resolve_clears, l.resolve_clears),
@@ -278,7 +278,7 @@ void OnSwap() {
         per(c.transfers_skipped, l.transfers_skipped),
         per(c.transfers_deferred, l.transfers_deferred),
         per(c.transfers_materialized, l.transfers_materialized),
-        per(c.transfers_cleared, l.transfers_cleared));
+        per(c.transfers_cleared, l.transfers_cleared), per(c.draws_deduped, l.draws_deduped));
     std::string breakdown;
     for (uint32_t i = 0; i < uint32_t(GpuCategory::kCount); ++i) {
       double ms = per(c.gpu_category_ns[i], l.gpu_category_ns[i]) / 1e6;
