@@ -1002,6 +1002,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // full-size color + depth pair instead of the EDRAM-sized strip targets;
   // each strip's rows are copied into the strip targets before its resolve,
   // so everything downstream is unchanged.
+  // The last Update consumed the draw (it must not be issued).
+  bool Fh2TakeSkipDraw() {
+    bool skip = fh2_skip_draw_;
+    fh2_skip_draw_ = false;
+    return skip;
+  }
   bool Fh2FullFrameActive() const { return fh2_ff_.active; }
   bool Fh2FullFrameBegin(uint32_t frame_width, uint32_t frame_height, uint32_t strip_height);
   void Fh2FullFrameCopyStripToHost(uint32_t strip_y);
@@ -1082,6 +1088,14 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     float host_depth;
   };
   std::vector<Fh2PendingDepthClear> fh2_pending_depth_clears_;
+  // FH2 shadow maps: drawn into a 1x depth target, cleared with a 4x quad
+  // through a 4x view of the same EDRAM (a quarter of the pixels to fill).
+  // Such a clear is done on the 1x target (rectangle doubled) and the draw is
+  // skipped, so ownership never flips to 4x and back (two big transfers per
+  // cascade).
+  bool fh2_skip_draw_ = false;
+  bool Fh2RedirectQuadClearTo1x(reg::RB_DEPTHCONTROL normalized_depth_control,
+                                uint32_t normalized_color_mask, const Shader& vertex_shader);
   bool fh2_depth_only_clear_ = false;
   float fh2_depth_only_clear_value_ = 0.0f;
   void Fh2PerformPendingDepthClears();

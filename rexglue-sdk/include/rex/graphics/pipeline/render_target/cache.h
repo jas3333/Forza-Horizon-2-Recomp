@@ -488,6 +488,10 @@ class RenderTargetCache {
   virtual bool IsHostDepthEncodingDifferent(xenos::DepthRenderTargetFormat format) const = 0;
 
   void ResetAccumulatedRenderTargets() { are_accumulated_render_targets_valid_ = false; }
+  // Ownership map snapshot, to undo the ownership change of an Update whose
+  // draw the backend then performs differently (FH2 4x quad clears).
+  void SnapshotOwnership() { ownership_snapshot_ = ownership_ranges_; }
+  void RestoreOwnershipSnapshot() { ownership_ranges_ = ownership_snapshot_; }
   RenderTarget* const* last_update_accumulated_render_targets() const {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_accumulated_render_targets_;
@@ -660,6 +664,7 @@ class RenderTargetCache {
   // since standard containers use dynamic allocation for elements, though
   // changes to this throughout a frame are pretty rare.
   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+  std::map<uint32_t, OwnershipRange> ownership_snapshot_;
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.

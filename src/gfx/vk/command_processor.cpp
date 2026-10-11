@@ -4029,6 +4029,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                     normalized_color_mask, *vertex_shader)) {
     return draw_fail("render_target_update");
   }
+  if (render_target_cache_->Fh2TakeSkipDraw()) {
+    return true;
+  }
 
   // FH2 full-frame strips.
   Fh2FullFrameRegisterOverride fh2_full_frame_override(*register_file_);

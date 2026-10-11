@@ -1567,9 +1567,27 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
 bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                      reg::RB_DEPTHCONTROL normalized_depth_control,
                                      uint32_t normalized_color_mask, const Shader& vertex_shader) {
+  fh2_skip_draw_ = false;
+  // Clear-only draw into a 4x depth target: keep the ownership map to restore
+  // if the clear is redirected to the 1x twin.
+  bool fh2_quad_clear_candidate =
+      is_rasterization_done && !normalized_color_mask && normalized_depth_control.z_enable &&
+      normalized_depth_control.z_write_enable &&
+      normalized_depth_control.zfunc == xenos::CompareFunction::kAlways &&
+      !normalized_depth_control.stencil_enable &&
+      register_file().Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k4X &&
+      fh2::rtlog::TimedEnvInt("FH2_QUAD_CLEAR_1X", 1) != 0;
+  if (fh2_quad_clear_candidate) {
+    SnapshotOwnership();
+  }
   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
                                  normalized_color_mask, vertex_shader)) {
     return false;
+  }
+  if (fh2_quad_clear_candidate &&
+      Fh2RedirectQuadClearTo1x(normalized_depth_control, normalized_color_mask, vertex_shader)) {
+    fh2_skip_draw_ = true;
+    return true;
   }
   SCOPE_profile_zone("gpu:RT update");
   {
@@ -7576,6 +7594,60 @@ std::optional<VulkanRenderTargetCache::Fh2ClearInfo> VulkanRenderTargetCache::Fh
           ? std::clamp(z, 0.0f, 2.0f) * 0.5f
           : std::clamp(z, 0.0f, 1.0f);
   return info;
+}
+
+bool VulkanRenderTargetCache::Fh2RedirectQuadClearTo1x(
+    reg::RB_DEPTHCONTROL normalized_depth_control, uint32_t normalized_color_mask,
+    const Shader& vertex_shader) {
+  RenderTarget* const* rts = last_update_accumulated_render_targets();
+  RenderTarget* depth = rts[0];
+  if (!depth || depth->key().msaa_samples != xenos::MsaaSamples::k4X) {
+    return false;
+  }
+  for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+    if (rts[i]) return false;
+  }
+  // Every transfer into the 4x target must come from its 1x twin: same base,
+  // pitch and format (the 1x target owned the whole range).
+  RenderTargetKey key_4x = depth->key();
+  const std::vector<Transfer>& transfers = last_update_transfers()[0];
+  if (transfers.empty()) {
+    return false;
+  }
+  RenderTarget* twin = nullptr;
+  for (const Transfer& transfer : transfers) {
+    RenderTargetKey source_key = transfer.source->key();
+    if (!source_key.is_depth || source_key.msaa_samples != xenos::MsaaSamples::k1X ||
+        source_key.base_tiles != key_4x.base_tiles ||
+        source_key.GetPitchTiles() != key_4x.GetPitchTiles() ||
+        source_key.resource_format != key_4x.resource_format ||
+        (twin && transfer.source != twin)) {
+      return false;
+    }
+    twin = transfer.source;
+  }
+  std::optional<Fh2ClearInfo> clear = Fh2ClearDrawHostDepth(
+      vertex_shader, normalized_depth_control, normalized_color_mask, depth);
+  if (!clear) {
+    return false;
+  }
+  // 4x pixel (x, y) sample (sx, sy) is 1x pixel (2x + sx, 2y + sy).
+  RestoreOwnershipSnapshot();
+  ResetAccumulatedRenderTargets();
+  Fh2PendingDepthClear pending;
+  pending.render_target = static_cast<VulkanRenderTarget*>(twin);
+  pending.rectangle.x_pixels = clear->x0 * 2;
+  pending.rectangle.y_pixels = clear->y0 * 2;
+  pending.rectangle.width_pixels = (clear->x1 - clear->x0) * 2;
+  pending.rectangle.height_pixels = (clear->y1 - clear->y0) * 2;
+  pending.host_depth = clear->host_depth;
+  fh2::rtlog::Log("    4x quad clear redone on {}", Fh2DescribeRT(twin));
+  fh2_pending_depth_clears_.push_back(pending);
+  Fh2PerformPendingDepthClears();
+  static_cast<VulkanRenderTarget*>(twin)->Fh2MarkWritten(
+      clear->x0 * 2, clear->x1 * 2, clear->y0 * 2, clear->y1 * 2, clear->host_depth, true);
+  ++fh2::rtlog::g_counters.draws_deduped;
+  return true;
 }
 
 void VulkanRenderTargetCache::Fh2PerformPendingDepthClears() {
