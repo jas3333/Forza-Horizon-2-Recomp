@@ -475,11 +475,12 @@ extern "C" REX_FUNC(sub_8255D2C0) {
   ctx.r3.u64 = 0;
 }
 
-// Xbox Live Cloud Save / Telemetry Sync offline no-op
-extern "C" REX_FUNC(sub_82D9F3E0) {
-  (void)base;
-  ctx.r3.u64 = 0; // Return success / offline
-}
+// sub_82D9F3E0 is NOT a cloud-save/telemetry stub (as it was once labelled
+// and no-op'd here): it is the player-database loader -- ATTACH
+// 'memorydb:\N' AS filedb, list filedb's tables, then CREATE TABLE
+// [Profile0_X] + INSERT ... SELECT * FROM filedb.[X] for each. With it
+// stubbed every saved PlayerDatabase was ignored and the first Profile0_
+// query crashed on a null statement (found by tracing Xenia, 2026-10-11).
 
 // Festival Leaderboard / Cloud Session offline handler
 extern "C" REX_FUNC(sub_827DC190) {
@@ -886,6 +887,9 @@ extern "C" REX_FUNC(sub_82D9F808) {
     std::string sql;
     for (size_t i = 0; i < 90 && c[i]; ++i) sql += (c[i] >= 32 && c[i] < 127) ? c[i] : '.';
     REXKRNL_INFO("[SQL] r7={:08X} {}", ctx.r7.u32, sql);
+    __imp__sub_82D9F808(ctx, base);
+    REXKRNL_INFO("[SQL]   -> r3={:08X}", ctx.r3.u32);
+    return;
   }
   __imp__sub_82D9F808(ctx, base);
 }

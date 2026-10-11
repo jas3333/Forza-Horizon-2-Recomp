@@ -175,7 +175,7 @@ class Forzahorizon2App : public rex::ReXApp {
     auto* fd = runtime()->function_dispatcher();
     if (fd) {
       fd->SetFunction(0x824A5FC0, Hook_sub_824A5FC0);
-      fd->SetFunction(0x82D9F3E0, Hook_sub_82D9F3E0);
+      // 0x82D9F3E0 (player-database loader) must run: see forzahorizon2_hooks.cpp.
       fd->SetFunction(0x8245F9E0, Hook_sub_82D9F3E0);
 
       // NOTE: do not register a phantom module at code_base 0 to make
