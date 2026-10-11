@@ -149,7 +149,7 @@ int TimedEnvInt(const char* name, int default_value) {
     uint64_t frame;
     int value;
   };
-  static CacheEntry cache[16];
+  static CacheEntry cache[64];
   static uint32_t cache_size = 0;
   for (uint32_t i = 0; i < cache_size; ++i) {
     CacheEntry& entry = cache[i];
@@ -162,7 +162,7 @@ int TimedEnvInt(const char* name, int default_value) {
     }
   }
   int value = TimedEnvIntUncached(name, default_value);
-  if (cache_size < 16) {
+  if (cache_size < 64) {
     cache[cache_size++] = {name, default_value, g_frame, value};
   }
   return value;

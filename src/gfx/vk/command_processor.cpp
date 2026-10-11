@@ -5345,27 +5345,28 @@ uint64_t VulkanCommandProcessor::Fh2DrawFingerprint(const Shader& vertex_shader,
                                                    xenos::PrimitiveType prim_type,
                                                    uint32_t index_count,
                                                    const IndexBufferInfo* index_buffer_info) const {
+  // Gathered into one buffer and hashed once (many small streaming updates
+  // were ~7% of the command thread in busy scenes).
   const RegisterFile& regs = *register_file_;
-  XXH3_state_t state;
-  XXH3_64bits_reset(&state);
+  thread_local std::vector<uint32_t> data;
+  data.clear();
+  auto append = [](const uint32_t* words, size_t count) {
+    data.insert(data.end(), words, words + count);
+  };
   uint64_t shader_hashes[2] = {vertex_shader.ucode_data_hash(),
                                pixel_shader ? pixel_shader->ucode_data_hash() : 0};
-  XXH3_64bits_update(&state, shader_hashes, sizeof(shader_hashes));
+  append(reinterpret_cast<const uint32_t*>(shader_hashes), 4);
   uint32_t geometry[4] = {index_count, uint32_t(prim_type),
                           index_buffer_info ? index_buffer_info->guest_base : 0,
                           regs[XE_GPU_REG_VGT_INDX_OFFSET]};
-  XXH3_64bits_update(&state, geometry, sizeof(geometry));
+  append(geometry, 4);
   for (const auto& binding : vertex_shader.vertex_bindings()) {
-    XXH3_64bits_update(
-        &state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 2],
-        sizeof(uint32_t) * 2);
+    append(&regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 2], 2);
   }
   for (const Shader* stage_shader : {&vertex_shader, pixel_shader}) {
     if (!stage_shader) continue;
     for (const auto& binding : stage_shader->texture_bindings()) {
-      XXH3_64bits_update(
-          &state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6],
-          sizeof(uint32_t) * 6);
+      append(&regs.values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6], 6);
     }
     uint32_t constant_base = stage_shader == pixel_shader ? 256 : 0;
     const auto& map = stage_shader->constant_register_map();
@@ -5374,21 +5375,18 @@ uint64_t VulkanCommandProcessor::Fh2DrawFingerprint(const Shader& vertex_shader,
       while (bits) {
         uint32_t constant = constant_base + word * 64 + uint32_t(__builtin_ctzll(bits));
         bits &= bits - 1;
-        XXH3_64bits_update(&state,
-                           &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + constant * 4],
-                           sizeof(uint32_t) * 4);
+        append(&regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X + constant * 4], 4);
       }
     }
-    XXH3_64bits_update(&state, map.bool_bitmap, sizeof(map.bool_bitmap));
+    append(reinterpret_cast<const uint32_t*>(map.bool_bitmap), sizeof(map.bool_bitmap) / 4);
   }
   // Bool / loop constants and the render state that decides what is written.
-  XXH3_64bits_update(&state, &regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031],
-                     sizeof(uint32_t) * (8 + 32));
+  append(&regs.values[XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031], 8 + 32);
   uint32_t state_regs[] = {regs[XE_GPU_REG_RB_DEPTHCONTROL], regs[XE_GPU_REG_RB_COLOR_MASK],
                            regs[XE_GPU_REG_RB_BLENDCONTROL0], regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
                            regs[XE_GPU_REG_RB_STENCILREFMASK], regs[XE_GPU_REG_RB_COLORCONTROL]};
-  XXH3_64bits_update(&state, state_regs, sizeof(state_regs));
-  return XXH3_64bits_digest(&state);
+  append(state_regs, sizeof(state_regs) / 4);
+  return XXH3_64bits(data.data(), data.size() * sizeof(uint32_t));
 }
 
 bool VulkanCommandProcessor::Fh2DrawBlends() const {
