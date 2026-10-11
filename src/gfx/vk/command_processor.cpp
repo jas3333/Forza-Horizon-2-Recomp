@@ -4400,7 +4400,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
         }
       }
     }
-    fh2::rtlog::Log("D {:016X} m{:X}", XXH3_64bits_digest(fp_state), uint32_t(bin_mask_));
+    // Pixel shader and the textures it reads (address:format:width x height).
+    std::string fh2_tex;
+    if (pixel_shader) {
+      for (const auto& binding : pixel_shader->texture_bindings()) {
+        xenos::xe_gpu_texture_fetch_t fetch = fp_regs.GetTextureFetch(binding.fetch_constant);
+        fh2_tex += fmt::format(" t{}={:08X}:{}:{}x{}", binding.fetch_constant,
+                               fetch.base_address << 12, uint32_t(fetch.format),
+                               fetch.size_2d.width + 1, fetch.size_2d.height + 1);
+      }
+    }
+    fh2::rtlog::Log("D {:016X} m{:X} vs {:016X} ps {:016X}{}", XXH3_64bits_digest(fp_state),
+                    uint32_t(bin_mask_), vertex_shader->ucode_data_hash(),
+                    pixel_shader ? pixel_shader->ucode_data_hash() : 0, fh2_tex);
     if (fh2_log_next_draw_placement_) {
       fh2_log_next_draw_placement_ = false;
       auto window_offset = fp_regs.Get<reg::PA_SC_WINDOW_OFFSET>();
