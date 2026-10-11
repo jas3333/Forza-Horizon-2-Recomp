@@ -47,8 +47,15 @@ void DebugPrint(fmt::string_view format, const Args&... args) {
 
 #include <tracy/Tracy.hpp>
 
-// CPU profiling zones
+// CPU profiling zones. The generic per-function zones (SCOPE_profile_cpu_f)
+// sit in per-draw / per-packet paths and cost a profiler lookup each even with
+// no client connected (~1% of FH2's GPU thread): opt-in with
+// REXGLUE_PROFILE_ALL_FUNCTIONS. Named zones (SCOPE_profile_zone) stay.
+#ifdef REXGLUE_PROFILE_ALL_FUNCTIONS
 #define SCOPE_profile_cpu_f(name) ZoneNamedN(___tracy_cpu_zone, name, TracyIsStarted)
+#else
+#define SCOPE_profile_cpu_f(name)
+#endif
 // Named zone with a line-unique variable, so it can share a scope with
 // another zone (SCOPE_profile_cpu_f always declares ___tracy_cpu_zone).
 #define SCOPE_profile_zone(name) \
