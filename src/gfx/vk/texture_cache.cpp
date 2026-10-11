@@ -1247,15 +1247,24 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     // isn't a known resolve destination yet: the car's reflection cube map
     // loaded its mips once, before the per-face mip resolves were seen, then
     // the skip-memory path left them stale forever (blocky reflections).
-    bool complex_reader = !load_base || key.dimension != xenos::DataDimension::k2DOrStacked ||
+    bool complex_reader = !load_base || load_mips || key.dimension != xenos::DataDimension::k2DOrStacked ||
                           key.GetDepthOrArraySize() != 1;
-    if (from_resolve || complex_reader) {
-      bool known = false;
+    auto add_reader = [&](uint32_t start, uint32_t length) {
+      if (!length) return;
       for (const Fh2ResolveReader& reader : fh2_resolve_readers_) {
-        known |= reader.key == key && reader.start == address;
+        if (reader.key == key && reader.start == start) return;
       }
-      if (!known) {
-        fh2_resolve_readers_.push_back({address, address + size, key});
+      fh2_resolve_readers_.push_back({start, start + length, key});
+    };
+    if (from_resolve || complex_reader) {
+      add_reader(address, size);
+    }
+    // Base and mips loaded in one call: the mip range is a reader too (it
+    // was missed -- the reflection cube map loads both at once).
+    if (load_base && load_mips && texture.GetGuestMipsSize()) {
+      uint32_t mips_address = key.mip_page << 12;
+      if (complex_reader || fh2::rtlog::OverlapsResolveDest(mips_address, texture.GetGuestMipsSize())) {
+        add_reader(mips_address, texture.GetGuestMipsSize());
       }
     }
     if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage()) {
