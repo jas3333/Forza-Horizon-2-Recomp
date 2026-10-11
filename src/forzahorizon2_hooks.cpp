@@ -970,6 +970,12 @@ extern "C" REX_FUNC(sub_82B72A90) {
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
   };
+  // Only time the wait while a profiler is attached: clock reads around every
+  // spin iteration cost a quarter of this thread otherwise.
+  if (!TracyIsConnected) {
+    __imp__sub_82B72A90(ctx, base);
+    return;
+  }
   int64_t t0 = now();
   __imp__sub_82B72A90(ctx, base);
   int64_t t1 = now();

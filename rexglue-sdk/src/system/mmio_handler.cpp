@@ -406,6 +406,12 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
     // clears the watch we just hit).
     // Do this under the lock so we don't introduce another race condition.
     auto lock = global_critical_region_.Acquire();
+#if !REX_PLATFORM_LINUX
+    // On Linux QueryProtect parses /proc/self/maps: thousands of lines per
+    // fault (hundreds of faults per second in FH2), and not async-signal-safe
+    // inside the SIGSEGV handler. Skipped there, as in Xenia: if another thread
+    // already cleared the watch, the callback finds no watch and its recovery
+    // path restores write access from the guest protection.
     memory::PageAccess cur_access;
     size_t page_length = memory::page_size();
     memory::QueryProtect(fault_host_address, page_length, cur_access);
@@ -414,6 +420,7 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
       // Another thread has cleared this watch. Abort.
       return true;
     }
+#endif
     // The address is not found within any range, so either a write watch or an
     // actual access violation.
     if (access_violation_callback_) {
