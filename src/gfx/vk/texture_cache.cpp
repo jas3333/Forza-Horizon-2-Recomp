@@ -3488,6 +3488,13 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
         key.pitch * 32 != dest_pitch_texels) {
       continue;
     }
+    // Plain single-layer 2D textures only. A resolve into one face of a cube
+    // map (or a slice of an array / 3D texture) matched as a 2D sub-rect of
+    // layer 0, and the post-write revalidation then marked the whole texture
+    // up to date -- the other faces kept stale data (blocky car reflections).
+    if (key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1) {
+      continue;
+    }
     auto* texture = static_cast<VulkanTexture*>(FindExistingTexture(key));
     if (!texture || !texture->fh2_storage() ||
         dest_address >= base + texture->GetGuestBaseSize()) {
