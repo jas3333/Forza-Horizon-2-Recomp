@@ -1179,8 +1179,10 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
   image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   // FH2 direct resolve: textures over resolve output are written by compute.
   bool fh2_storage = fh2_storage_set_layout_ != VK_NULL_HANDLE && key.tiled &&
-                     key.dimension == xenos::DataDimension::k2DOrStacked &&
-                     key.depth_or_array_size_minus_1 == 0 &&
+                     ((key.dimension == xenos::DataDimension::k2DOrStacked &&
+                       key.depth_or_array_size_minus_1 == 0) ||
+                      (key.dimension == xenos::DataDimension::kCube &&
+                       fh2::rtlog::TimedEnvInt("FH2_DIRECT_CUBE", 1) != 0)) &&
                      Fh2IsDirectResolveFormat(key.format) &&
                      fh2_storage_format_supported_[uint32_t(key.format)] &&
                      fh2::rtlog::OverlapsResolveDest(key.base_page << 12, 1);
@@ -1267,7 +1269,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         add_reader(mips_address, texture.GetGuestMipsSize());
       }
     }
-    if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage()) {
+    if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage() &&
+        key.dimension == xenos::DataDimension::kCube) {
+      if (std::find(fh2_resolve_cube_keys_.begin(), fh2_resolve_cube_keys_.end(), key) ==
+          fh2_resolve_cube_keys_.end()) {
+        fh2_resolve_cube_keys_.push_back(key);
+      }
+    } else if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage()) {
       std::vector<TextureKey>& keys = fh2_resolve_texture_keys_[key.base_page << 12];
       if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
         keys.push_back(key);
@@ -1923,11 +1931,15 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
   if (image_view_3d_as_2d_signed_ != VK_NULL_HANDLE) {
     dfn.vkDestroyImageView(device, image_view_3d_as_2d_signed_, nullptr);
   }
-  if (fh2_storage_set_ != VK_NULL_HANDLE && vulkan_texture_cache.fh2_storage_pool_) {
-    dfn.vkFreeDescriptorSets(device, vulkan_texture_cache.fh2_storage_pool_, 1, &fh2_storage_set_);
+  for (VkDescriptorSet set : fh2_storage_sets_) {
+    if (set != VK_NULL_HANDLE && vulkan_texture_cache.fh2_storage_pool_) {
+      dfn.vkFreeDescriptorSets(device, vulkan_texture_cache.fh2_storage_pool_, 1, &set);
+    }
   }
-  if (fh2_storage_view_ != VK_NULL_HANDLE) {
-    dfn.vkDestroyImageView(device, fh2_storage_view_, nullptr);
+  for (VkImageView view : fh2_storage_views_) {
+    if (view != VK_NULL_HANDLE) {
+      dfn.vkDestroyImageView(device, view, nullptr);
+    }
   }
   vmaDestroyImage(vulkan_texture_cache.vma_allocator_, image_, allocation_);
 }
@@ -3412,9 +3424,23 @@ void VulkanTextureCache::Fh2ShutdownDirectResolve() {
   fh2_resolve_texture_keys_.clear();
 }
 
-VkDescriptorSet VulkanTextureCache::VulkanTexture::Fh2GetStorageDescriptorSet() {
-  if (fh2_storage_set_ != VK_NULL_HANDLE || !fh2_storage_) {
-    return fh2_storage_set_;
+VkDescriptorSet VulkanTextureCache::VulkanTexture::Fh2GetStorageDescriptorSet(uint32_t level,
+                                                                              uint32_t layer) {
+  if (!fh2_storage_) {
+    return VK_NULL_HANDLE;
+  }
+  uint32_t layers = key().dimension == xenos::DataDimension::k3D ? 1 : key().GetDepthOrArraySize();
+  uint32_t levels = key().mip_max_level + 1;
+  if (level >= levels || layer >= layers) {
+    return VK_NULL_HANDLE;
+  }
+  if (fh2_storage_sets_.empty()) {
+    fh2_storage_sets_.resize(levels * layers, VK_NULL_HANDLE);
+    fh2_storage_views_.resize(levels * layers, VK_NULL_HANDLE);
+  }
+  uint32_t index = level * layers + layer;
+  if (fh2_storage_sets_[index] != VK_NULL_HANDLE) {
+    return fh2_storage_sets_[index];
   }
   auto& cache = static_cast<VulkanTextureCache&>(texture_cache());
   const ui::vulkan::VulkanDevice* const vulkan_device = cache.command_processor_.GetVulkanDevice();
@@ -3425,29 +3451,102 @@ VkDescriptorSet VulkanTextureCache::VulkanTexture::Fh2GetStorageDescriptorSet() 
   view_info.image = image_;
   view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
   view_info.format = key().signed_separate ? pair.format_signed.format : pair.format_unsigned.format;
-  view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  if (dfn.vkCreateImageView(device, &view_info, nullptr, &fh2_storage_view_) != VK_SUCCESS) {
-    fh2_storage_view_ = VK_NULL_HANDLE;
-    fh2_storage_ = false;
+  view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, layer, 1};
+  VkImageView view;
+  if (dfn.vkCreateImageView(device, &view_info, nullptr, &view) != VK_SUCCESS) {
     return VK_NULL_HANDLE;
   }
   VkDescriptorSetAllocateInfo allocate_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   allocate_info.descriptorPool = cache.fh2_storage_pool_;
   allocate_info.descriptorSetCount = 1;
   allocate_info.pSetLayouts = &cache.fh2_storage_set_layout_;
-  if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &fh2_storage_set_) != VK_SUCCESS) {
-    fh2_storage_set_ = VK_NULL_HANDLE;
-    fh2_storage_ = false;
+  VkDescriptorSet set;
+  if (dfn.vkAllocateDescriptorSets(device, &allocate_info, &set) != VK_SUCCESS) {
+    dfn.vkDestroyImageView(device, view, nullptr);
     return VK_NULL_HANDLE;
   }
-  VkDescriptorImageInfo image_info = {VK_NULL_HANDLE, fh2_storage_view_, VK_IMAGE_LAYOUT_GENERAL};
+  VkDescriptorImageInfo image_info = {VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
   VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  write.dstSet = fh2_storage_set_;
+  write.dstSet = set;
   write.descriptorCount = 1;
   write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
   write.pImageInfo = &image_info;
   dfn.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-  return fh2_storage_set_;
+  fh2_storage_views_[index] = view;
+  fh2_storage_sets_[index] = set;
+  return set;
+}
+
+bool VulkanTextureCache::Fh2FindResolveTargetCube(uint32_t dest_address,
+                                                  uint32_t dest_pitch_texels,
+                                                  xenos::TextureFormat format, bool scaled,
+                                                  uint32_t offset_x, uint32_t offset_y,
+                                                  uint32_t width, uint32_t height,
+                                                  std::vector<Fh2ResolveTarget>& out) {
+  // Only a resolve of one whole face of one level (at the start of that
+  // subresource), so the face stays fully up to date.
+  if (offset_x || offset_y || fh2_resolve_cube_keys_.empty() ||
+      !fh2::rtlog::TimedEnvInt("FH2_DIRECT_CUBE", 1)) {
+    return false;
+  }
+  bool found = false;
+  for (const TextureKey& key : fh2_resolve_cube_keys_) {
+    if (key.format != format || bool(key.scaled_resolve) != scaled) {
+      continue;
+    }
+    auto* texture = static_cast<VulkanTexture*>(FindExistingTexture(key));
+    if (!texture || !texture->fh2_storage()) {
+      continue;
+    }
+    const texture_util::TextureGuestLayout& layout = texture->guest_layout();
+    uint32_t base = key.base_page << 12, mip_base = key.mip_page << 12;
+    uint32_t packed_level = key.packed_mips
+                                ? texture_util::GetPackedMipLevel(key.GetWidth(), key.GetHeight())
+                                : UINT32_MAX;
+    for (uint32_t level = 0; level <= key.mip_max_level && !found; ++level) {
+      if (level && level >= packed_level) {
+        break;
+      }
+      const texture_util::TextureGuestLayout::Level& guest_level =
+          level ? layout.mips[level] : layout.base;
+      uint32_t start = level ? mip_base + layout.mip_offsets_bytes[level] : base;
+      if (level ? !mip_base : false) {
+        break;
+      }
+      uint32_t stride = guest_level.array_slice_stride_bytes;
+      if (dest_address < start || !stride || (dest_address - start) % stride ||
+          (dest_address - start) / stride >= 6) {
+        continue;
+      }
+      uint32_t face = (dest_address - start) / stride;
+      uint32_t level_width = std::max(key.GetWidth() >> level, 1u);
+      uint32_t level_height = std::max(key.GetHeight() >> level, 1u);
+      if (guest_level.row_pitch_bytes / 4 != dest_pitch_texels || width < level_width ||
+          height < level_height) {
+        continue;
+      }
+      {
+        auto global_lock = rex::thread::global_critical_region::AcquireDirect();
+        if (texture->base_outdated(global_lock) ||
+            (texture->GetGuestMipsSize() && texture->mips_outdated(global_lock))) {
+          fh2::rtlog::Log("    cube {:08X} rejected: outdated", base);
+          break;
+        }
+      }
+      if (texture->Fh2GetStorageDescriptorSet(level, face) == VK_NULL_HANDLE) {
+        break;
+      }
+      Fh2ResolveTarget& target = out.emplace_back();
+      target.texture = texture;
+      target.width = level_width;
+      target.height = level_height;
+      target.level = level;
+      target.layer = face;
+      fh2::rtlog::Log("    cube {:08X} face {} level {}", base, face, level);
+      found = true;
+    }
+  }
+  return found;
 }
 
 bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t dest_pitch_texels,
@@ -3458,9 +3557,11 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
   // Every texture over this memory that the resolve can keep up to date
   // (one guest range may be fetched with several keys, e.g. endianness).
   out.clear();
+  Fh2FindResolveTargetCube(dest_address, dest_pitch_texels, format, scaled, offset_x, offset_y,
+                           width, height, out);
   auto it = fh2_resolve_texture_keys_.upper_bound(dest_address);
   if (it == fh2_resolve_texture_keys_.begin()) {
-    return false;
+    return !out.empty();
   }
   --it;
   uint32_t base = it->first;
@@ -3493,7 +3594,7 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
         }
       }
       if (!found) {
-        return false;
+        return !out.empty();
       }
       fh2_tiled_offset_positions_.emplace((uint64_t(dest_pitch_texels) << 32) | offset,
                                           std::make_pair(column_offset, row_offset));
@@ -3556,7 +3657,9 @@ bool VulkanTextureCache::Fh2RangeHasOtherReaders(
     bool is_target = false;
     for (const Fh2ResolveTarget& target : targets) {
       is_target |= target.texture->key() == reader.key &&
-                   reader.start == (reader.key.base_page << 12);
+                   (reader.start == (reader.key.base_page << 12) ||
+                    (reader.key.dimension == xenos::DataDimension::kCube &&
+                     reader.start == (reader.key.mip_page << 12)));
     }
     if (!is_target) {
       return true;

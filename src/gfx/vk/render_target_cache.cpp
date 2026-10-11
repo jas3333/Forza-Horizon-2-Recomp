@@ -1254,6 +1254,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
         for (const auto& target : skip_targets) {
           memory_resolves_nearby |= fh2::rtlog::OverlapsRecentMemoryResolve(
               target.texture->key().base_page << 12, target.texture->GetGuestBaseSize());
+          if (target.texture->GetGuestMipsSize()) {
+            memory_resolves_nearby |= fh2::rtlog::OverlapsRecentMemoryResolve(
+                target.texture->key().mip_page << 12, target.texture->GetGuestMipsSize());
+          }
         }
         memory_resolves_nearby |= fh2::rtlog::OverlapsNonTextureReader(
             resolve_info.copy_dest_extent_start, resolve_info.copy_dest_extent_length);
@@ -7043,7 +7047,7 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     command_processor_.BindExternalComputePipeline(pipeline);
     VkDescriptorSet sets[2] = {
         from_full_frame ? direct.full_frame_set : rt.GetDescriptorSetTransferSource(),
-        texture.Fh2GetStorageDescriptorSet()};
+        texture.Fh2GetStorageDescriptorSet(write.target.level, write.target.layer)};
     command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 2,
                                            sets, 0, nullptr);
     Fh2ResolveConstants constants;

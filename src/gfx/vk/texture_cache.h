@@ -219,7 +219,8 @@ class VulkanTextureCache final : public TextureCache {
     // textures created with storage usage).
     bool fh2_storage() const { return fh2_storage_; }
     void fh2_set_storage(bool storage) { fh2_storage_ = storage; }
-    VkDescriptorSet Fh2GetStorageDescriptorSet();
+    // Storage view of one mip level of one array layer / cube face.
+    VkDescriptorSet Fh2GetStorageDescriptorSet(uint32_t level = 0, uint32_t layer = 0);
     VkImageView GetOrCreate3DAs2DImageView(bool is_signed, uint32_t host_swizzle);
 
    private:
@@ -273,8 +274,9 @@ class VulkanTextureCache final : public TextureCache {
     VkImage image_;
     VmaAllocation allocation_;
     bool fh2_storage_ = false;
-    VkImageView fh2_storage_view_ = VK_NULL_HANDLE;
-    VkDescriptorSet fh2_storage_set_ = VK_NULL_HANDLE;
+    // Per subresource (level * layers + layer), created on first use.
+    std::vector<VkImageView> fh2_storage_views_;
+    std::vector<VkDescriptorSet> fh2_storage_sets_;
 
     Usage usage_ = Usage::kUndefined;
 
@@ -339,7 +341,8 @@ class VulkanTextureCache final : public TextureCache {
   struct Fh2ResolveTarget {
     VulkanTexture* texture = nullptr;
     uint32_t x = 0, y = 0;            // unscaled texel offset of the resolve
-    uint32_t width = 0, height = 0;   // unscaled texture size
+    uint32_t width = 0, height = 0;   // unscaled texture size (of the level)
+    uint32_t level = 0, layer = 0;    // subresource (cube face mips)
   };
   // offset_x/y and width/height: the resolve rectangle relative to
   // dest_address (unscaled). A texture the resolve fully covers may be
@@ -377,6 +380,13 @@ class VulkanTextureCache final : public TextureCache {
     TextureKey key;
   };
   std::vector<Fh2ResolveReader> fh2_resolve_readers_;
+  // Cube maps loaded from resolve output: resolves into one whole face of one
+  // level go straight into that subresource (the reflection cube map).
+  std::vector<TextureKey> fh2_resolve_cube_keys_;
+  bool Fh2FindResolveTargetCube(uint32_t dest_address, uint32_t dest_pitch_texels,
+                                xenos::TextureFormat format, bool scaled, uint32_t offset_x,
+                                uint32_t offset_y, uint32_t width, uint32_t height,
+                                std::vector<Fh2ResolveTarget>& out);
   // (pitch << 32 | tiled byte offset) -> 32x32-aligned (x, y).
   std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> fh2_tiled_offset_positions_;
   VkDescriptorSetLayout fh2_storage_set_layout_ = VK_NULL_HANDLE;
