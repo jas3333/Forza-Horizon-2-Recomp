@@ -1392,7 +1392,8 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           uint32_t fh2_resolve_width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
           bool fh2_resolve_is_depth =
               resolve_info.rb_copy_control.copy_src_select >= xenos::kMaxColorRenderTargets;
-          if (fh2_direct_mode == 1 || (fh2_direct_mode == 2 && fh2_resolve_width >= 1280) ||
+          if (fh2_direct_mode == 1 || fh2_direct_mode == 5 ||
+              (fh2_direct_mode == 2 && fh2_resolve_width >= 1280) ||
               (fh2_direct_mode == 3 && fh2_resolve_width < 1280) ||
               (fh2_direct_mode == 4 && !fh2_resolve_is_depth)) {
             fh2_direct_ok =
@@ -6650,7 +6651,14 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   bool is_depth = control.copy_src_select >= xenos::kMaxColorRenderTargets;
   // Depth direct resolves broke shadows in the race (2026-10-10): only with
   // FH2_DIRECT_RESOLVE=1 until fixed.
-  if (is_depth && fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4) != 1) {
+  // FH2_DIRECT_RESOLVE=5: color + float (scene) depth, no unorm24 (shadow maps).
+  int direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 4);
+  if (is_depth && direct_mode != 1 && direct_mode != 5) {
+    return false;
+  }
+  if (is_depth && direct_mode == 5 &&
+      xenos::DepthRenderTargetFormat(resolve_info.depth_edram_info.format) !=
+          xenos::DepthRenderTargetFormat::kD24FS8) {
     return false;
   }
   if (is_depth ? control.copy_command != xenos::CopyCommand::kRaw
