@@ -1248,10 +1248,13 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
         keys.push_back(key);
       }
     }
-    fh2::rtlog::Log("  texload {:08X} {}x{}x{} fmt {} {}{}{} len {:X}{}", address, key.GetWidth(),
-                    key.GetHeight(), key.GetDepthOrArraySize(), uint32_t(key.format),
-                    key.tiled ? "tiled" : "linear", load_base ? "" : " mips",
-                    key.scaled_resolve ? " scaled" : "", size, from_resolve ? " FROM-RESOLVE" : "");
+    fh2::rtlog::Log("  texload {:08X} {}x{}x{} fmt {} {}{}{} len {:X} endian {} mips {} pitch {}{}{}",
+                    address, key.GetWidth(), key.GetHeight(), key.GetDepthOrArraySize(),
+                    uint32_t(key.format), key.tiled ? "tiled" : "linear", load_base ? "" : " mips",
+                    key.scaled_resolve ? " scaled" : "", size, uint32_t(key.endianness),
+                    uint32_t(key.mip_max_level), uint32_t(key.pitch),
+                    static_cast<VulkanTexture&>(texture).fh2_storage() ? " storage" : "",
+                    from_resolve ? " FROM-RESOLVE" : "");
   }
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
@@ -3425,7 +3428,10 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
                                               xenos::TextureFormat format, bool scaled,
                                               uint32_t offset_x, uint32_t offset_y,
                                               uint32_t width, uint32_t height,
-                                              Fh2ResolveTarget& out) {
+                                              std::vector<Fh2ResolveTarget>& out) {
+  // Every texture over this memory that the resolve can keep up to date
+  // (one guest range may be fetched with several keys, e.g. endianness).
+  out.clear();
   auto it = fh2_resolve_texture_keys_.upper_bound(dest_address);
   if (it == fh2_resolve_texture_keys_.begin()) {
     return false;
@@ -3460,16 +3466,17 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
         continue;
       }
     }
-    out.texture = texture;
-    out.x = 0;
-    out.y = row_offset;
-    out.width = key.GetWidth();
-    out.height = key.GetHeight();
-    if (texture->Fh2GetStorageDescriptorSet() != VK_NULL_HANDLE) {
-      return true;
+    if (texture->Fh2GetStorageDescriptorSet() == VK_NULL_HANDLE) {
+      continue;
     }
+    Fh2ResolveTarget& target = out.emplace_back();
+    target.texture = texture;
+    target.x = 0;
+    target.y = row_offset;
+    target.width = key.GetWidth();
+    target.height = key.GetHeight();
   }
-  return false;
+  return !out.empty();
 }
 
 void VulkanTextureCache::Fh2BeginResolveWrite(VulkanTexture& texture) {

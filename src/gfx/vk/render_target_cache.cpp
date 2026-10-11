@@ -1364,8 +1364,11 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           if (fh2_direct_ok) {
             Fh2RecordDirectResolve(texture_cache, fh2_direct);
             ++fh2::rtlog::g_counters.direct_resolves;
-            fh2::rtlog::Log("    direct -> texture at ({},{}) {}x{} (scaled)", fh2_direct.dst_x,
-                            fh2_direct.dst_y, fh2_direct.width, fh2_direct.height);
+            for (const auto& write : fh2_direct.writes) {
+              fh2::rtlog::Log("    direct -> texture (endian {}) at ({},{}) {}x{} (scaled)",
+                              uint32_t(write.target.texture->key().endianness), write.dst_x, write.dst_y,
+                              write.width, write.height);
+            }
           } else if (fh2_miss_reason) {
             ++fh2::rtlog::g_counters.direct_resolve_misses;
             fh2::rtlog::Log("    direct resolve miss: {}", fh2_miss_reason);
@@ -6526,12 +6529,13 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   uint32_t scale_x = draw_resolution_scale_x(), scale_y = draw_resolution_scale_y();
   bool scaled = scale_x > 1 || scale_y > 1;
   uint32_t dest_pitch = resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 * 32;
-  if (!texture_cache.Fh2FindResolveTarget(
-          resolve_info.copy_dest_base, dest_pitch, dest_format, scaled,
-          uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8,
-          uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8,
-          uint32_t(resolve_info.coordinate_info.width_div_8) * 8, resolve_info.height_div_8 * 8,
-          out.target)) {
+  uint32_t dest_offset_x = uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8;
+  uint32_t dest_offset_y = uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8;
+  uint32_t width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
+  uint32_t height = resolve_info.height_div_8 * 8;
+  if (!texture_cache.Fh2FindResolveTarget(resolve_info.copy_dest_base, dest_pitch, dest_format,
+                                          scaled, dest_offset_x, dest_offset_y, width, height,
+                                          fh2_resolve_targets_)) {
     miss_reason = "no up-to-date target texture";
     return false;
   }
@@ -6556,24 +6560,28 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
                    uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) * 8;
   uint32_t src_y = (delta / pitch) * tile_height +
                    uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) * 8;
-  uint32_t dst_x = out.target.x + uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8;
-  uint32_t dst_y = out.target.y + uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8;
-  uint32_t width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
-  uint32_t height = resolve_info.height_div_8 * 8;
-  if (dst_x >= out.target.width || dst_y >= out.target.height) {
+
+  out.writes.clear();
+  for (const VulkanTextureCache::Fh2ResolveTarget& target : fh2_resolve_targets_) {
+    uint32_t dst_x = target.x + dest_offset_x;
+    uint32_t dst_y = target.y + dest_offset_y;
+    if (dst_x >= target.width || dst_y >= target.height) {
+      continue;
+    }
+    Fh2DirectResolveWrite& write = out.writes.emplace_back();
+    write.target = target;
+    write.dst_x = int32_t(dst_x * scale_x);
+    write.dst_y = int32_t(dst_y * scale_y);
+    write.width = std::min(width, target.width - dst_x) * scale_x;
+    write.height = std::min(height, target.height - dst_y) * scale_y;
+  }
+  if (out.writes.empty()) {
     miss_reason = "outside the texture";
     return false;
   }
-  width = std::min(width, out.target.width - dst_x);
-  height = std::min(height, out.target.height - dst_y);
-
   out.source = source;
   out.src_x = int32_t(src_x * scale_x);
   out.src_y = int32_t(src_y * scale_y);
-  out.dst_x = int32_t(dst_x * scale_x);
-  out.dst_y = int32_t(dst_y * scale_y);
-  out.width = width * scale_x;
-  out.height = height * scale_y;
   out.samples_index = samples_index;
   out.integer_view = integer_view;
   out.scale = std::ldexp(1.0f, int32_t(dest.copy_dest_exp_bias));
@@ -6590,31 +6598,32 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
       VK_ACCESS_SHADER_READ_BIT, rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-  VulkanTextureCache::VulkanTexture& texture = *direct.target.texture;
-  texture_cache.Fh2BeginResolveWrite(texture);
-  command_processor_.SubmitBarriers(true);
-
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
-  command_processor_.BindExternalComputePipeline(
-      fh2_resolve_pipelines_[direct.samples_index][direct.integer_view]);
-  VkDescriptorSet sets[2] = {rt.GetDescriptorSetTransferSource(),
-                             texture.Fh2GetStorageDescriptorSet()};
-  command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
-                                         fh2_resolve_pipeline_layout_, 0, 2, sets, 0, nullptr);
-  Fh2ResolveConstants constants;
-  constants.src_offset[0] = direct.src_x;
-  constants.src_offset[1] = direct.src_y;
-  constants.dst_offset[0] = direct.dst_x;
-  constants.dst_offset[1] = direct.dst_y;
-  constants.size[0] = int32_t(direct.width);
-  constants.size[1] = int32_t(direct.height);
-  constants.scale = direct.scale;
-  constants.flags = direct.swap_red_blue ? 1u : 0u;
-  command_buffer.CmdVkPushConstants(fh2_resolve_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                                    sizeof(constants), &constants);
-  command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
-  command_buffer.CmdVkDispatch((direct.width + 7) / 8, (direct.height + 7) / 8, 1);
-  texture_cache.Fh2EndResolveWrite(texture);
+  for (const Fh2DirectResolveWrite& write : direct.writes) {
+    VulkanTextureCache::VulkanTexture& texture = *write.target.texture;
+    texture_cache.Fh2BeginResolveWrite(texture);
+    command_processor_.SubmitBarriers(true);
+    command_processor_.BindExternalComputePipeline(
+        fh2_resolve_pipelines_[direct.samples_index][direct.integer_view]);
+    VkDescriptorSet sets[2] = {rt.GetDescriptorSetTransferSource(),
+                               texture.Fh2GetStorageDescriptorSet()};
+    command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
+                                           fh2_resolve_pipeline_layout_, 0, 2, sets, 0, nullptr);
+    Fh2ResolveConstants constants;
+    constants.src_offset[0] = direct.src_x;
+    constants.src_offset[1] = direct.src_y;
+    constants.dst_offset[0] = write.dst_x;
+    constants.dst_offset[1] = write.dst_y;
+    constants.size[0] = int32_t(write.width);
+    constants.size[1] = int32_t(write.height);
+    constants.scale = direct.scale;
+    constants.flags = direct.swap_red_blue ? 1u : 0u;
+    command_buffer.CmdVkPushConstants(fh2_resolve_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                      sizeof(constants), &constants);
+    command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
+    command_buffer.CmdVkDispatch((write.width + 7) / 8, (write.height + 7) / 8, 1);
+    texture_cache.Fh2EndResolveWrite(texture);
+  }
 }
 
 }  // namespace rex::graphics::fh2vk

@@ -347,7 +347,7 @@ class VulkanTextureCache final : public TextureCache {
   bool Fh2FindResolveTarget(uint32_t dest_address, uint32_t dest_pitch_texels,
                             xenos::TextureFormat format, bool scaled, uint32_t offset_x,
                             uint32_t offset_y, uint32_t width, uint32_t height,
-                            Fh2ResolveTarget& out);
+                            std::vector<Fh2ResolveTarget>& out);
   // Barrier for the compute write; then revalidation after it was recorded.
   void Fh2BeginResolveWrite(VulkanTexture& texture);
   void Fh2EndResolveWrite(VulkanTexture& texture);
