@@ -1637,16 +1637,34 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       const std::vector<Transfer>* transfers = last_update_transfers();
       fh2::rtlog::TransferMode transfer_mode = fh2::rtlog::CurrentTransferMode();
       if (transfer_mode != fh2::rtlog::TransferMode::kAll) {
-        // Experiment: drop transfers between unrelated formats (or all of them).
+        // Drop transfers between unrelated formats (or all of them) -- except
+        // into a color target whose old contents this draw keeps: it writes
+        // only some channels or blends with what is there. FH2's dusk
+        // light/fog pass multiplies G/B/A of an 8888 target that aliases the
+        // depth buffer and keeps R from the depth bits; without the
+        // depth -> color transfer the lights lost their red (cyan ground,
+        // green street lights, 19:05-19:29 game time).
+        const RegisterFile& fh2_regs = register_file();
+        auto color_keeps_old = [&](uint32_t color_index) {
+          uint32_t mask = (normalized_color_mask >> (color_index * 4)) & 0xF;
+          if (mask != 0xF) return true;
+          static const uint32_t kBlendControls[] = {
+              XE_GPU_REG_RB_BLENDCONTROL0, XE_GPU_REG_RB_BLENDCONTROL1,
+              XE_GPU_REG_RB_BLENDCONTROL2, XE_GPU_REG_RB_BLENDCONTROL3};
+          // Anything but "source x 1 + dest x 0" (color and alpha) blends.
+          return (fh2_regs[kBlendControls[color_index]] & 0x1FFF1FFF) != 0x00010001;
+        };
         for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
           fh2_filtered_transfers_[i].clear();
           if (!depth_and_color_render_targets[i]) continue;
           RenderTargetKey dest_key = depth_and_color_render_targets[i]->key();
+          bool keeps_old = i != 0 && color_keeps_old(i - 1);
           for (const Transfer& transfer : transfers[i]) {
             RenderTargetKey source_key = transfer.source->key();
+            bool same_format = source_key.is_depth == dest_key.is_depth &&
+                               source_key.resource_format == dest_key.resource_format;
             bool keep = transfer_mode == fh2::rtlog::TransferMode::kSameFormat &&
-                        source_key.is_depth == dest_key.is_depth &&
-                        source_key.resource_format == dest_key.resource_format;
+                        (same_format || keeps_old);
             if (keep) fh2_filtered_transfers_[i].push_back(transfer);
           }
         }
