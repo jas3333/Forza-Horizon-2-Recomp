@@ -1226,7 +1226,7 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
     // memory then).
     bool fh2_memory_skipped = false;
     if (GetPath() == Path::kHostRenderTargets &&
-        fh2::rtlog::TimedEnvInt("FH2_RESOLVE_SKIP_MEMORY", 0) &&
+        fh2::rtlog::TimedEnvInt("FH2_RESOLVE_SKIP_MEMORY", 1) &&
         (fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) == 1 ||
          fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) == 4)) {
       uint32_t skip_dump_base, skip_dump_row_length_used, skip_dump_rows, skip_dump_pitch;
