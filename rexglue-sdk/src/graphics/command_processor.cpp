@@ -1029,16 +1029,15 @@ bool CommandProcessor::IsOrderedPacketOpcode(uint32_t opcode) {
     case PM4_ME_INIT:
     case PM4_INTERRUPT:
     case PM4_XE_SWAP:
-    case PM4_WAIT_REG_MEM:
     case PM4_REG_RMW:
     case PM4_REG_TO_MEM:
     case PM4_MEM_WRITE:
     case PM4_COND_WRITE:
-    case PM4_EVENT_WRITE:
+    // Not EVENT_WRITE (a register write), EVENT_WRITE_EXT (constant extents
+    // to memory), INVALIDATE_STATE (nothing) -- hundreds per frame in FH2.
+    // WAIT_REG_MEM enters ordered mode itself, only if it has to wait.
     case PM4_EVENT_WRITE_SHD:
-    case PM4_EVENT_WRITE_EXT:
     case PM4_EVENT_WRITE_ZPD:
-    case PM4_INVALIDATE_STATE:
     case PM4_VIZ_QUERY:
       return true;
     default:
@@ -1173,6 +1172,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   bool matched = false;
   uint32_t wait_polls = 0;
   std::chrono::steady_clock::time_point first_wait_start;
+  // Ordered (backend draw thread drained) only once the condition isn't met
+  // right away -- the value may come from work still being processed.
+  bool entered_ordered = false;
   do {
     uint32_t value = 0;
     if (is_memory) {
@@ -1212,6 +1214,11 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
         matched = true;
         break;
     }
+    if (!matched && !entered_ordered) {
+      OnOrderedPacketBegin(PM4_WAIT_REG_MEM);
+      entered_ordered = true;
+      continue;
+    }
     if (!matched) {
       // Wait.
       if (wait >= 0x100) {
@@ -1240,6 +1247,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
 
         if (!worker_running_) {
           // Short-circuited exit.
+          if (entered_ordered) {
+            OnOrderedPacketEnd();
+          }
           return false;
         }
       } else {
@@ -1247,6 +1257,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       }
     }
   } while (!matched);
+  if (entered_ordered) {
+    OnOrderedPacketEnd();
+  }
   if (wait_polls) {
     OnPm4Trace(Pm4TraceEvent::kWaitRegMem, poll_reg_addr,
                uint32_t(std::chrono::duration_cast<std::chrono::microseconds>(
