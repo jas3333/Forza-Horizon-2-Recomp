@@ -879,6 +879,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
   VkPipeline resolve_fsi_clear_32bpp_pipeline_ = VK_NULL_HANDLE;
   VkPipeline resolve_fsi_clear_64bpp_pipeline_ = VK_NULL_HANDLE;
+
+  std::vector<Transfer> fh2_filtered_transfers_[1 + xenos::kMaxColorRenderTargets];
 };
 
 }  // namespace rex::graphics::fh2vk

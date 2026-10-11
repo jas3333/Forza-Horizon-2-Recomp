@@ -57,6 +57,15 @@ extern bool g_active;
 // the counters.
 void OnSwap();
 
+// Seconds since the first swap.
+double SecondsSinceStart();
+
+// Experiment: which EDRAM ownership transfers to perform.
+// FH2_TRANSFER_MODES="all@0,samefmt@45,none@60" switches by time.
+enum class TransferMode { kAll, kSameFormat, kNone };
+TransferMode CurrentTransferMode();
+const char* TransferModeName(TransferMode mode);
+
 // Resolve destinations of the logged and recent frames, to tag texture loads
 // that read resolve output.
 void NoteResolveDest(uint32_t address, uint32_t length);

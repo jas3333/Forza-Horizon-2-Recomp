@@ -1495,8 +1495,26 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
       RenderTarget* const* depth_and_color_render_targets =
           last_update_accumulated_render_targets();
 
+      const std::vector<Transfer>* transfers = last_update_transfers();
+      fh2::rtlog::TransferMode transfer_mode = fh2::rtlog::CurrentTransferMode();
+      if (transfer_mode != fh2::rtlog::TransferMode::kAll) {
+        // Experiment: drop transfers between unrelated formats (or all of them).
+        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          fh2_filtered_transfers_[i].clear();
+          if (!depth_and_color_render_targets[i]) continue;
+          RenderTargetKey dest_key = depth_and_color_render_targets[i]->key();
+          for (const Transfer& transfer : transfers[i]) {
+            RenderTargetKey source_key = transfer.source->key();
+            bool keep = transfer_mode == fh2::rtlog::TransferMode::kSameFormat &&
+                        source_key.is_depth == dest_key.is_depth &&
+                        source_key.resource_format == dest_key.resource_format;
+            if (keep) fh2_filtered_transfers_[i].push_back(transfer);
+          }
+        }
+        transfers = fh2_filtered_transfers_;
+      }
       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
-                                       depth_and_color_render_targets, last_update_transfers());
+                                       depth_and_color_render_targets, transfers);
 
       if (depth_and_color_render_targets[0]) {
         render_pass_key.depth_and_color_used |= 1 << 0;

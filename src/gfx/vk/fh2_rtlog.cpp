@@ -59,6 +59,57 @@ bool OverlapsResolveDest(uint32_t address, uint32_t length) {
   return it != g_resolve_dests.end() && it->first < end;
 }
 
+double SecondsSinceStart() {
+  if (!g_frame) return 0.0;
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count();
+}
+
+namespace {
+struct TransferModeStep {
+  double from_seconds;
+  TransferMode mode;
+};
+std::vector<TransferModeStep> ParseTransferModes() {
+  std::vector<TransferModeStep> steps;
+  const char* env = std::getenv("FH2_TRANSFER_MODES");
+  if (!env) return steps;
+  std::string text(env);
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t comma = text.find(',', pos);
+    if (comma == std::string::npos) comma = text.size();
+    std::string item = text.substr(pos, comma - pos);
+    size_t at = item.find('@');
+    std::string name = item.substr(0, at);
+    double seconds = at == std::string::npos ? 0.0 : std::atof(item.c_str() + at + 1);
+    TransferMode mode = name == "none"      ? TransferMode::kNone
+                        : name == "samefmt" ? TransferMode::kSameFormat
+                                            : TransferMode::kAll;
+    steps.push_back({seconds, mode});
+    pos = comma + 1;
+  }
+  return steps;
+}
+const std::vector<TransferModeStep> g_transfer_steps = ParseTransferModes();
+}  // namespace
+
+TransferMode CurrentTransferMode() {
+  TransferMode mode = TransferMode::kAll;
+  double seconds = SecondsSinceStart();
+  for (const TransferModeStep& step : g_transfer_steps) {
+    if (seconds >= step.from_seconds) mode = step.mode;
+  }
+  return mode;
+}
+
+const char* TransferModeName(TransferMode mode) {
+  switch (mode) {
+    case TransferMode::kNone: return "none";
+    case TransferMode::kSameFormat: return "samefmt";
+    default: return "all";
+  }
+}
+
 void OnSwap() {
   auto now = std::chrono::steady_clock::now();
   if (g_frame++ == 0) g_start = now;
@@ -88,10 +139,10 @@ void OnSwap() {
       return double(now_value - last_value) / kStatFrames;
     };
     REXGPU_INFO(
-        "[RTSTAT] per frame: draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
+        "[RTSTAT] per frame (transfers mode {}): draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
         "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}",
-        per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
+        TransferModeName(CurrentTransferMode()), per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
         per(c.resolve_bytes, l.resolve_bytes) / 1e6, per(c.resolve_clears, l.resolve_clears),
         per(c.dumps, l.dumps), per(c.tex_loads, l.tex_loads),
