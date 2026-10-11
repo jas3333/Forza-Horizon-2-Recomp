@@ -1220,7 +1220,40 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
         resolve_info.GetCopyShader(draw_resolution_scale_x(), draw_resolution_scale_y(),
                                    copy_shader_constants, copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
-    if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
+    // FH2: when the resolve can go straight into the texture(s) sampling it,
+    // skip the EDRAM dump and the guest memory write entirely
+    // (FH2_RESOLVE_SKIP_MEMORY; experimental -- nothing else may read that
+    // memory then).
+    bool fh2_memory_skipped = false;
+    if (GetPath() == Path::kHostRenderTargets &&
+        fh2::rtlog::TimedEnvInt("FH2_RESOLVE_SKIP_MEMORY", 0) &&
+        fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1) == 1) {
+      uint32_t skip_dump_base, skip_dump_row_length_used, skip_dump_rows, skip_dump_pitch;
+      resolve_info.GetCopyEdramTileSpan(skip_dump_base, skip_dump_row_length_used, skip_dump_rows,
+                                        skip_dump_pitch);
+      GetResolveCopyRectanglesToDump(skip_dump_base, skip_dump_row_length_used, skip_dump_rows,
+                                     skip_dump_pitch, dump_rectangles_);
+      for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+        Fh2Materialize(static_cast<VulkanRenderTarget*>(rectangle.render_target),
+                       "direct resolve");
+      }
+      Fh2DirectResolve skip_direct;
+      const char* skip_miss_reason = nullptr;
+      if (!dump_rectangles_.empty() &&
+          Fh2PrepareDirectResolve(resolve_info, texture_cache, skip_direct, skip_miss_reason)) {
+        texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                          resolve_info.copy_dest_extent_length);
+        Fh2RecordDirectResolve(texture_cache, skip_direct);
+        ++fh2::rtlog::g_counters.direct_resolves;
+        ++fh2::rtlog::g_counters.resolves_memory_skipped;
+        fh2::rtlog::Log("    direct, guest memory skipped ({} textures)", skip_direct.writes.size());
+        written_address_out = resolve_info.copy_dest_extent_start;
+        written_length_out = resolve_info.copy_dest_extent_length;
+        copied = true;
+        fh2_memory_skipped = true;
+      }
+    }
+    if (!fh2_memory_skipped && copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
       bool direct_resolved = false;

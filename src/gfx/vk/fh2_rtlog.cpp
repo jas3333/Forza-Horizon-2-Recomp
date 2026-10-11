@@ -177,7 +177,7 @@ void OnSwap() {
         "[RTSTAT] per frame (transfers mode {}): draws {:.0f}, rt changes {:.1f}, transfers {:.1f} (into {:.1f} "
         "RTs), resolves {:.1f} ({:.2f} MB, {:.1f} clears), dumps {:.1f}, texture loads {:.1f} "
         "({:.2f} MB, {:.1f} of resolve output), GPU {:.2f} ms, predicated skips {:.1f}, "
-        "direct resolves {:.1f} (misses {:.1f}), transfers narrowed {:.1f} skipped {:.1f} "
+        "direct resolves {:.1f} (misses {:.1f}, memory skipped {:.1f}), transfers narrowed {:.1f} skipped {:.1f} "
         "deferred {:.1f} materialized {:.1f}",
         TransferModeName(CurrentTransferMode()), per(c.draws, l.draws), per(c.rt_changes, l.rt_changes), per(c.transfers, l.transfers),
         per(c.transfer_rts, l.transfer_rts), per(c.resolves, l.resolves),
@@ -187,6 +187,7 @@ void OnSwap() {
         per(c.tex_loads_resolved, l.tex_loads_resolved), per(c.gpu_ns, l.gpu_ns) / 1e6,
         per(c.predicated_skips, l.predicated_skips), per(c.direct_resolves, l.direct_resolves),
         per(c.direct_resolve_misses, l.direct_resolve_misses),
+        per(c.resolves_memory_skipped, l.resolves_memory_skipped),
         per(c.transfers_narrowed, l.transfers_narrowed),
         per(c.transfers_skipped, l.transfers_skipped),
         per(c.transfers_deferred, l.transfers_deferred),
