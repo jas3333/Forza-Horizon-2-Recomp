@@ -1051,6 +1051,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
     reg::RB_DEPTHCONTROL normalized_depth_control, uint32_t normalized_color_mask,
     VulkanRenderTargetCache::RenderPassKey render_pass_key, VkPipeline& pipeline_out,
     const PipelineLayoutProvider*& pipeline_layout_out, void** pipeline_handle_out) {
+  SCOPE_profile_zone("gpu:pipeline");
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES

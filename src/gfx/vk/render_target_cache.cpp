@@ -32,6 +32,10 @@
 #include "command_processor.h"
 #include "deferred_command_buffer.h"
 #include "render_target_cache.h"
+
+#include "fh2_rtlog.h"
+
+#include <rex/dbg.h>
 #include <rex/graphics/xenos.h>
 #include <rex/logging.h>
 #include <rex/math.h>
@@ -63,6 +67,26 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
 //     "GPU");
 
 namespace rex::graphics::fh2vk {
+
+namespace {
+template <typename RT>
+std::string Fh2DescribeRT(const RT* rt) {
+  if (!rt) return "-";
+  auto key = rt->key();
+  return fmt::format("{}@{}/p{}x{}", key.is_depth ? xenos::GetDepthRenderTargetFormatName(key.GetDepthFormat())
+                                                  : xenos::GetColorRenderTargetFormatName(key.GetColorFormat()),
+                     uint32_t(key.base_tiles), uint32_t(key.pitch_tiles_at_32bpp), 1u << uint32_t(key.msaa_samples));
+}
+uint32_t g_fh2_last_keys[1 + xenos::kMaxColorRenderTargets] = {};
+uint32_t g_fh2_segment_draws = 0;
+uint64_t g_fh2_segment_vs = 0;
+void Fh2FlushSegment() {
+  if (g_fh2_segment_draws) {
+    fh2::rtlog::Log("    {} draws (first vs {:016X})", g_fh2_segment_draws, g_fh2_segment_vs);
+  }
+  g_fh2_segment_draws = 0;
+}
+}  // namespace
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -1145,6 +1169,40 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
     return true;
   }
+  SCOPE_profile_zone("gpu:Resolve");
+  {
+    auto& counters = fh2::rtlog::g_counters;
+    ++counters.resolves;
+    counters.resolve_bytes += resolve_info.copy_dest_extent_length;
+    const auto& control = resolve_info.rb_copy_control;
+    if (control.color_clear_enable || control.depth_clear_enable) ++counters.resolve_clears;
+    fh2::rtlog::NoteResolveDest(resolve_info.copy_dest_extent_start,
+                                resolve_info.copy_dest_extent_length);
+    if (fh2::rtlog::g_active) {
+      Fh2FlushSegment();
+      bool depth = control.copy_src_select >= xenos::kMaxColorRenderTargets;
+      const auto& edram = depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+      const auto& dest = resolve_info.copy_dest_info;
+      fh2::rtlog::Log(
+          "RESOLVE src {} {}@{}/p{}x{} off ({},{})x8 size {}x{} -> {} {:08X} len {:X} fmt {} "
+          "num {} bias {} endian {} swap {} pitch {} h {}{}{}",
+          depth ? "depth" : fmt::format("color{}", uint32_t(control.copy_src_select)),
+          depth ? xenos::GetDepthRenderTargetFormatName(xenos::DepthRenderTargetFormat(edram.format))
+                : xenos::GetColorRenderTargetFormatName(xenos::ColorRenderTargetFormat(edram.format)),
+          uint32_t(edram.base_tiles), uint32_t(edram.pitch_tiles), 1u << uint32_t(edram.msaa_samples),
+          uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8),
+          uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8),
+          uint32_t(resolve_info.coordinate_info.width_div_8) * 8, resolve_info.height_div_8 * 8,
+          uint32_t(control.copy_command) == 0 ? "copy" : fmt::format("cmd{}", uint32_t(control.copy_command)),
+          resolve_info.copy_dest_base, resolve_info.copy_dest_extent_length,
+          uint32_t(dest.copy_dest_format), uint32_t(dest.copy_dest_number), int32_t(dest.copy_dest_exp_bias),
+          uint32_t(dest.copy_dest_endian), uint32_t(dest.copy_dest_swap),
+          uint32_t(resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32) * 32,
+          uint32_t(resolve_info.copy_dest_coordinate_info.height_aligned_div_32) * 32,
+          control.color_clear_enable ? fmt::format(" clear-color {:08X}", resolve_info.rb_color_clear) : "",
+          control.depth_clear_enable ? fmt::format(" clear-depth {:08X}", resolve_info.rb_depth_clear) : "");
+    }
+  }
 
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -1378,12 +1436,50 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   return copied && cleared;
 }
 
+
 bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
                                      reg::RB_DEPTHCONTROL normalized_depth_control,
                                      uint32_t normalized_color_mask, const Shader& vertex_shader) {
   if (!RenderTargetCache::Update(is_rasterization_done, normalized_depth_control,
                                  normalized_color_mask, vertex_shader)) {
     return false;
+  }
+  SCOPE_profile_zone("gpu:RT update");
+  {
+    auto& counters = fh2::rtlog::g_counters;
+    ++counters.draws;
+    RenderTarget* const* rts = last_update_accumulated_render_targets();
+    const std::vector<Transfer>* transfers = last_update_transfers();
+    bool changed = false;
+    size_t transfer_count = 0;
+    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+      uint32_t key = rts[i] ? rts[i]->key().key : 0;
+      changed |= key != g_fh2_last_keys[i];
+      g_fh2_last_keys[i] = key;
+      if (!transfers[i].empty()) {
+        ++counters.transfer_rts;
+        transfer_count += transfers[i].size();
+      }
+    }
+    counters.transfers += transfer_count;
+    if (changed) {
+      ++counters.rt_changes;
+      if (fh2::rtlog::g_active) {
+        Fh2FlushSegment();
+        fh2::rtlog::Log("RT depth {} color {} {} {} {}", Fh2DescribeRT(rts[0]), Fh2DescribeRT(rts[1]),
+                        Fh2DescribeRT(rts[2]), Fh2DescribeRT(rts[3]), Fh2DescribeRT(rts[4]));
+      }
+    }
+    if (transfer_count && fh2::rtlog::g_active) {
+      for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+        for (const Transfer& transfer : transfers[i]) {
+          fh2::rtlog::Log("    transfer into slot {}: tiles {}-{} from {}{}", i, transfer.start_tiles,
+                          transfer.end_tiles, Fh2DescribeRT(transfer.source),
+                          transfer.host_depth_source ? " (+host depth)" : "");
+        }
+      }
+    }
+    if (g_fh2_segment_draws++ == 0) g_fh2_segment_vs = vertex_shader.ucode_data_hash();
   }
 
   auto rb_surface_info = register_file().Get<reg::RB_SURFACE_INFO>();
@@ -6029,6 +6125,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
   if (dump_rectangles_.empty()) {
     return true;
   }
+  ++fh2::rtlog::g_counters.dumps;
 
   // Clear previously set temporary indices.
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {

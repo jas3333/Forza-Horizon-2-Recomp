@@ -27,6 +27,8 @@
 #include "command_processor.h"
 #include "deferred_command_buffer.h"
 #include "texture_cache.h"
+
+#include "fh2_rtlog.h"
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/ui/vulkan/mem_alloc.h>
@@ -1215,6 +1217,22 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
 
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                                                bool load_mips) {
+  SCOPE_profile_zone("gpu:texture load");
+  {
+    const TextureKey& key = texture.key();
+    uint32_t address = key.base_page << 12;
+    uint32_t size = load_base ? texture.GetGuestBaseSize() : texture.GetGuestMipsSize();
+    if (!load_base) address = key.mip_page << 12;
+    bool from_resolve = fh2::rtlog::OverlapsResolveDest(address, size);
+    auto& counters = fh2::rtlog::g_counters;
+    ++counters.tex_loads;
+    counters.tex_load_bytes += size;
+    counters.tex_loads_resolved += from_resolve;
+    fh2::rtlog::Log("  texload {:08X} {}x{}x{} fmt {} {}{}{} len {:X}{}", address, key.GetWidth(),
+                    key.GetHeight(), key.GetDepthOrArraySize(), uint32_t(key.format),
+                    key.tiled ? "tiled" : "linear", load_base ? "" : " mips",
+                    key.scaled_resolve ? " scaled" : "", size, from_resolve ? " FROM-RESOLVE" : "");
+  }
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
 
