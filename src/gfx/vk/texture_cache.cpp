@@ -3619,6 +3619,18 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
     }
     bool covers_all = row_offset == 0 && column_offset == 0 && offset_x == 0 && offset_y == 0 &&
                       width >= key.GetWidth() && height >= key.GetHeight();
+    // FH2 shadow maps: each cascade resolves its 520x520 (or 512x512) corner
+    // of a 1024x1024 depth texture whose memory a post-processing buffer
+    // reuses later in the frame (so the texture is always outdated). The rest
+    // of the texture is never sampled -- treat a depth resolve from the
+    // corner as covering it.
+    if (!covers_all && row_offset == 0 && column_offset == 0 && offset_x == 0 &&
+        offset_y == 0 && key.mip_max_level == 0 &&
+        (key.format == xenos::TextureFormat::k_24_8 ||
+         key.format == xenos::TextureFormat::k_24_8_FLOAT) &&
+        fh2::rtlog::TimedEnvInt("FH2_DIRECT_PARTIAL_DEPTH", 1) != 0) {
+      covers_all = true;
+    }
     {
       // Revalidation after the write also marks the mips up to date, so
       // outdated mips must not be involved.
