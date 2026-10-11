@@ -61,7 +61,8 @@ void OnSwap();
 double SecondsSinceStart();
 
 // Experiment: which EDRAM ownership transfers to perform.
-// FH2_TRANSFER_MODES="all@0,samefmt@45,none@60" switches by time.
+// Default samefmt; FH2_TRANSFER_MODES="all@0,samefmt@45,none@60" switches
+// by time (an entry @0 overrides the default).
 enum class TransferMode { kAll, kSameFormat, kNone };
 TransferMode CurrentTransferMode();
 const char* TransferModeName(TransferMode mode);

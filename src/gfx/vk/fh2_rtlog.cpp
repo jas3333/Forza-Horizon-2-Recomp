@@ -94,7 +94,10 @@ const std::vector<TransferModeStep> g_transfer_steps = ParseTransferModes();
 }  // namespace
 
 TransferMode CurrentTransferMode() {
-  TransferMode mode = TransferMode::kAll;
+  // Default: FH2 never reads EDRAM reinterpreted as an unrelated format (the
+  // game clears after such rebinds), but its 4x-MSAA fast clears reach the 1x
+  // targets through same-format transfers -- dropping those breaks shadows.
+  TransferMode mode = TransferMode::kSameFormat;
   double seconds = SecondsSinceStart();
   for (const TransferModeStep& step : g_transfer_steps) {
     if (seconds >= step.from_seconds) mode = step.mode;
