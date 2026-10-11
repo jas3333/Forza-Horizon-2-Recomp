@@ -1461,6 +1461,10 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
   bool cleared = false;
   bool clear_depth = resolve_info.IsClearingDepth();
   bool clear_color = resolve_info.IsClearingColor();
+  if (clear_depth && clear_color) {
+    Fh2FullFrameNoteResolveClear(resolve_info.rb_color_clear, resolve_info.rb_color_clear_lo,
+                                 resolve_info.rb_depth_clear);
+  }
   if (clear_depth || clear_color) {
     switch (GetPath()) {
       case Path::kHostRenderTargets: {
@@ -6336,6 +6340,7 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
   ++fh2::rtlog::g_counters.dumps;
   for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
     Fh2Materialize(static_cast<VulkanRenderTarget*>(rectangle.render_target), "dump");
+    Fh2FullFrameEnsureStripCopied(static_cast<VulkanRenderTarget*>(rectangle.render_target));
   }
   command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kDump);
 
@@ -6882,6 +6887,18 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
     return false;
   }
   out.source = source;
+  out.full_frame_image = VK_NULL_HANDLE;
+  out.full_frame_set = VK_NULL_HANDLE;
+  uint32_t full_frame_strip_y = 0;
+  if (Fh2FullFrameSource(source, out.full_frame_image, out.full_frame_set, full_frame_strip_y)) {
+    if (integer_view) {
+      out.full_frame_image = VK_NULL_HANDLE;  // no integer view of the full frame
+      out.full_frame_set = VK_NULL_HANDLE;
+      Fh2FullFrameEnsureStripCopied(source);
+    } else {
+      src_y += full_frame_strip_y;
+    }
+  }
   out.src_x = int32_t(src_x * scale_x);
   out.src_y = int32_t(src_y * scale_y);
   out.samples_index = samples_index;
@@ -6894,28 +6911,41 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
 void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture_cache,
                                                      const Fh2DirectResolve& direct) {
   VulkanRenderTarget& rt = *direct.source;
+  bool from_full_frame = direct.full_frame_image != VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout =
       direct.is_depth ? fh2_resolve_depth_pipeline_layout_ : fh2_resolve_pipeline_layout_;
   VkPipeline pipeline =
       direct.is_depth ? fh2_resolve_depth_pipelines_[direct.samples_index][direct.depth_float]
                       : fh2_resolve_pipelines_[direct.samples_index][direct.integer_view];
-  command_processor_.PushImageMemoryBarrier(
-      rt.image(),
-      ui::vulkan::util::InitializeSubresourceRange(
-          direct.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
-                          : VK_IMAGE_ASPECT_COLOR_BIT),
-      rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, rt.current_access_mask(),
-      VK_ACCESS_SHADER_READ_BIT, rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-  rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
-              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  VkImageSubresourceRange source_range = ui::vulkan::util::InitializeSubresourceRange(
+      direct.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                      : VK_IMAGE_ASPECT_COLOR_BIT);
+  VkPipelineStageFlags draw_stage;
+  VkAccessFlags draw_access;
+  VkImageLayout draw_layout;
+  VulkanRenderTarget::GetDrawUsage(direct.is_depth, &draw_stage, &draw_access, &draw_layout);
+  if (from_full_frame) {
+    command_processor_.PushImageMemoryBarrier(
+        direct.full_frame_image, source_range, draw_stage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        draw_access, VK_ACCESS_SHADER_READ_BIT, draw_layout,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  } else {
+    command_processor_.PushImageMemoryBarrier(
+        rt.image(), source_range, rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        rt.current_access_mask(), VK_ACCESS_SHADER_READ_BIT, rt.current_layout(),
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  }
   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
   for (const Fh2DirectResolveWrite& write : direct.writes) {
     VulkanTextureCache::VulkanTexture& texture = *write.target.texture;
     texture_cache.Fh2BeginResolveWrite(texture);
     command_processor_.SubmitBarriers(true);
     command_processor_.BindExternalComputePipeline(pipeline);
-    VkDescriptorSet sets[2] = {rt.GetDescriptorSetTransferSource(),
-                               texture.Fh2GetStorageDescriptorSet()};
+    VkDescriptorSet sets[2] = {
+        from_full_frame ? direct.full_frame_set : rt.GetDescriptorSetTransferSource(),
+        texture.Fh2GetStorageDescriptorSet()};
     command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 2,
                                            sets, 0, nullptr);
     Fh2ResolveConstants constants;
@@ -6932,6 +6962,12 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
     command_buffer.CmdVkDispatch((write.width + 7) / 8, (write.height + 7) / 8, 1);
     texture_cache.Fh2EndResolveWrite(texture);
+  }
+  if (from_full_frame) {
+    command_processor_.PushImageMemoryBarrier(
+        direct.full_frame_image, source_range, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, draw_stage,
+        VK_ACCESS_SHADER_READ_BIT, draw_access, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        draw_layout);
   }
 }
 
@@ -7416,6 +7452,13 @@ void VulkanRenderTargetCache::Fh2FullFrameDestroyImages() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   for (uint32_t i = 0; i < 2; ++i) {
+    if (fh2_ff_.descriptor_indices[i] != SIZE_MAX) {
+      (i == 0 ? *descriptor_set_pool_sampled_image_x2_ : *descriptor_set_pool_sampled_image_)
+          .Free(fh2_ff_.descriptor_indices[i]);
+      fh2_ff_.descriptor_indices[i] = SIZE_MAX;
+    }
+    if (fh2_ff_.sample_views[i]) dfn.vkDestroyImageView(device, fh2_ff_.sample_views[i], nullptr);
+    fh2_ff_.sample_views[i] = VK_NULL_HANDLE;
     if (fh2_ff_.views[i]) dfn.vkDestroyImageView(device, fh2_ff_.views[i], nullptr);
     if (fh2_ff_.images[i]) dfn.vkDestroyImage(device, fh2_ff_.images[i], nullptr);
     if (fh2_ff_.memory[i]) dfn.vkFreeMemory(device, fh2_ff_.memory[i], nullptr);
@@ -7424,6 +7467,8 @@ void VulkanRenderTargetCache::Fh2FullFrameDestroyImages() {
     fh2_ff_.memory[i] = VK_NULL_HANDLE;
     fh2_ff_.image_keys[i] = 0;
   }
+  if (fh2_ff_.stencil_view) dfn.vkDestroyImageView(device, fh2_ff_.stencil_view, nullptr);
+  fh2_ff_.stencil_view = VK_NULL_HANDLE;
   fh2_ff_.active = false;
 }
 
@@ -7459,6 +7504,7 @@ bool VulkanRenderTargetCache::Fh2FullFrameEnsureImages() {
             : VkSampleCountFlagBits(uint32_t(1) << uint32_t(key.msaa_samples));
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                       VK_IMAGE_USAGE_SAMPLED_BIT |
                        (i == 0 ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
                                : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -7480,6 +7526,47 @@ bool VulkanRenderTargetCache::Fh2FullFrameEnsureImages() {
     if (dfn.vkCreateImageView(device, &view_info, nullptr, &fh2_ff_.views[i]) != VK_SUCCESS) {
       Fh2FullFrameDestroyImages();
       return false;
+    }
+    // Sampling views and the transfer-source-style descriptor set.
+    VkImageViewCreateInfo sample_view_info = view_info;
+    if (i == 0) {
+      sample_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    if (dfn.vkCreateImageView(device, &sample_view_info, nullptr, &fh2_ff_.sample_views[i]) !=
+        VK_SUCCESS) {
+      Fh2FullFrameDestroyImages();
+      return false;
+    }
+    if (i == 0) {
+      VkImageViewCreateInfo stencil_view_info = view_info;
+      stencil_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+      if (dfn.vkCreateImageView(device, &stencil_view_info, nullptr, &fh2_ff_.stencil_view) !=
+          VK_SUCCESS) {
+        Fh2FullFrameDestroyImages();
+        return false;
+      }
+    }
+    {
+      ui::vulkan::SingleLayoutDescriptorSetPool& pool =
+          i == 0 ? *descriptor_set_pool_sampled_image_x2_ : *descriptor_set_pool_sampled_image_;
+      fh2_ff_.descriptor_indices[i] = pool.Allocate();
+      if (fh2_ff_.descriptor_indices[i] == SIZE_MAX) {
+        Fh2FullFrameDestroyImages();
+        return false;
+      }
+      VkDescriptorImageInfo image_infos[2] = {
+          {VK_NULL_HANDLE, fh2_ff_.sample_views[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+          {VK_NULL_HANDLE, fh2_ff_.stencil_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+      VkWriteDescriptorSet writes[2] = {};
+      for (uint32_t w = 0; w < 2; ++w) {
+        writes[w].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[w].dstSet = pool.Get(fh2_ff_.descriptor_indices[i]);
+        writes[w].dstBinding = w;
+        writes[w].descriptorCount = 1;
+        writes[w].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[w].pImageInfo = &image_infos[w];
+      }
+      dfn.vkUpdateDescriptorSets(device, i == 0 ? 2 : 1, writes, 0, nullptr);
     }
     fh2_ff_.image_keys[i] = fh2_ff_.keys[i];
     // Into the draw layout once (contents get copied in before use).
@@ -7611,31 +7698,149 @@ bool VulkanRenderTargetCache::Fh2FullFrameBegin(uint32_t frame_width, uint32_t f
   // The deferred copies of these targets must be real before reading them.
   Fh2Materialize(depth, "full-frame begin");
   Fh2Materialize(color, "full-frame begin");
-  // Every strip starts from the same (cleared) state as strip 0 does now:
-  // replicate it over the whole frame.
-  for (uint32_t i = 0; i < 2; ++i) {
-    for (uint32_t y = 0; y < frame_height; y += strip_height) {
-      Fh2FullFrameCopyRows(i, true, 0, y, std::min(strip_height, frame_height - y));
+  fh2_ff_.active = true;
+  fh2_ff_.strip_copied[0] = fh2_ff_.strip_copied[1] = 0;
+  // Every strip starts from the same (cleared) state as strip 0 does now.
+  // With the strip clear values known from earlier passes, fast-clear the
+  // frame; otherwise replicate the strip target over it.
+  fh2_ff_.used_clear_values = fh2_ff_.clear_values_known && fh2_ff_.clear_values_trusted &&
+                              Fh2FullFrameFastClear();
+  if (!fh2_ff_.used_clear_values) {
+    for (uint32_t i = 0; i < 2; ++i) {
+      for (uint32_t y = 0; y < frame_height; y += strip_height) {
+        Fh2FullFrameCopyRows(i, true, 0, y, std::min(strip_height, frame_height - y));
+      }
     }
   }
   Fh2FullFrameSetStripArea(0);
-  fh2_ff_.active = true;
   ++fh2::rtlog::g_counters.full_frame_passes;
   fh2::rtlog::Log("FULL-FRAME begin {}x{} strips of {}", frame_width, frame_height, strip_height);
   return true;
 }
 
 void VulkanRenderTargetCache::Fh2FullFrameCopyStripToHost(uint32_t strip_y) {
+  // Called at each resolve of the pass: remember the strip; its rows are
+  // copied into the strip targets only if a resolve has to read those.
   if (!fh2_ff_.active || strip_y >= fh2_ff_.height) {
     return;
   }
+  fh2_full_frame_strip_y_ = strip_y;
   uint32_t rows = std::min(fh2_ff_.strip_height, fh2_ff_.height - strip_y);
-  for (uint32_t i = 0; i < 2; ++i) {
-    Fh2FullFrameCopyRows(i, false, 0, strip_y, rows);
+  // The next strip follows (render area only matters for drawing).
+  Fh2FullFrameSetStripArea(std::min(strip_y + rows, fh2_ff_.height - 1));
+}
+
+void VulkanRenderTargetCache::Fh2FullFrameEnsureStripCopied(
+    const VulkanRenderTarget* render_target) {
+  if (!fh2_ff_.active) {
+    return;
   }
-  // The next strip follows.
-  Fh2FullFrameSetStripArea(strip_y + rows);
-  fh2::rtlog::Log("FULL-FRAME strip rows {}..{} -> strip targets", strip_y, strip_y + rows);
+  for (uint32_t i = 0; i < 2; ++i) {
+    if (render_target != fh2_ff_.targets[i] ||
+        fh2_ff_.strip_copied[i] == fh2_full_frame_strip_y_ + 1) {
+      continue;
+    }
+    uint32_t rows = std::min(fh2_ff_.strip_height, fh2_ff_.height - fh2_full_frame_strip_y_);
+    Fh2FullFrameCopyRows(i, false, 0, fh2_full_frame_strip_y_, rows);
+    fh2_ff_.strip_copied[i] = fh2_full_frame_strip_y_ + 1;
+    fh2::rtlog::Log("FULL-FRAME strip rows {}..{} -> strip target {}", fh2_full_frame_strip_y_,
+                    fh2_full_frame_strip_y_ + rows, i ? "color" : "depth");
+  }
+}
+
+bool VulkanRenderTargetCache::Fh2FullFrameSource(const VulkanRenderTarget* render_target,
+                                                 VkImage& image_out, VkDescriptorSet& set_out,
+                                                 uint32_t& strip_y_out) const {
+  if (!fh2_ff_.active) {
+    return false;
+  }
+  for (uint32_t i = 0; i < 2; ++i) {
+    if (render_target == fh2_ff_.targets[i] && fh2_ff_.descriptor_indices[i] != SIZE_MAX) {
+      image_out = fh2_ff_.images[i];
+      set_out = (i == 0 ? *descriptor_set_pool_sampled_image_x2_
+                        : *descriptor_set_pool_sampled_image_)
+                    .Get(fh2_ff_.descriptor_indices[i]);
+      strip_y_out = fh2_full_frame_strip_y_;
+      return true;
+    }
+  }
+  return false;
+}
+
+void VulkanRenderTargetCache::Fh2FullFrameNoteResolveClear(uint32_t color_clear,
+                                                           uint32_t color_clear_lo,
+                                                           uint32_t depth_clear) {
+  if (!fh2_ff_.active) {
+    return;
+  }
+  if (fh2_ff_.used_clear_values &&
+      (color_clear != fh2_ff_.color_clear || color_clear_lo != fh2_ff_.color_clear_lo ||
+       depth_clear != fh2_ff_.depth_clear)) {
+    // The values used for this pass's fast clear were wrong: copy from now on.
+    fh2_ff_.clear_values_trusted = false;
+    REXGPU_WARN("fh2gfx: full-frame strip clear values changed; using copies");
+  }
+  fh2_ff_.color_clear = color_clear;
+  fh2_ff_.color_clear_lo = color_clear_lo;
+  fh2_ff_.depth_clear = depth_clear;
+  fh2_ff_.clear_values_known = true;
+}
+
+bool VulkanRenderTargetCache::Fh2FullFrameFastClear() {
+  RenderTargetKey depth_key = fh2_ff_.targets[0]->key();
+  RenderTargetKey color_key = fh2_ff_.targets[1]->key();
+  VkClearAttachment attachments_values[2] = {};
+  // Color.
+  attachments_values[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  attachments_values[0].colorAttachment = 0;
+  uint32_t c = fh2_ff_.color_clear;
+  float* rgba = attachments_values[0].clearValue.color.float32;
+  switch (color_key.GetColorFormat()) {
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
+      for (uint32_t j = 0; j < 3; ++j) rgba[j] = xenos::Float7e3To32((c >> (j * 10)) & 0x3FF);
+      rgba[3] = ((c >> 30) & 0x3) * (1.0f / 0x3);
+      break;
+    case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+      for (uint32_t j = 0; j < 4; ++j) rgba[j] = ((c >> (j * 8)) & 0xFF) * (1.0f / 0xFF);
+      break;
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+    case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
+      for (uint32_t j = 0; j < 3; ++j) rgba[j] = ((c >> (j * 10)) & 0x3FF) * (1.0f / 0x3FF);
+      rgba[3] = ((c >> 30) & 0x3) * (1.0f / 0x3);
+      break;
+    default:
+      return false;
+  }
+  // Depth / stencil.
+  attachments_values[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  uint32_t depth_value = (fh2_ff_.depth_clear >> 8) & 0xFFFFFF;
+  attachments_values[1].clearValue.depthStencil.depth =
+      depth_key.GetDepthFormat() == xenos::DepthRenderTargetFormat::kD24FS8
+          ? xenos::Float20e4To32(depth_value) * 0.5f
+          : xenos::UNorm24To32(depth_value);
+  attachments_values[1].clearValue.depthStencil.stencil = fh2_ff_.depth_clear & 0xFF;
+  // Whole frame as the render area for the clear.
+  fh2_ff_.framebuffer.fh2_render_area_offset = {0, 0};
+  fh2_ff_.framebuffer.host_extent = {fh2_ff_.width * draw_resolution_scale_x(),
+                                     fh2_ff_.height * draw_resolution_scale_y()};
+  command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(last_update_render_pass_,
+                                                                      &fh2_ff_.framebuffer);
+  VkClearAttachment* attachments;
+  VkClearRect* rects;
+  command_processor_.deferred_command_buffer().CmdClearAttachmentsEmplace(2, attachments, 1,
+                                                                          rects);
+  attachments[0] = attachments_values[0];
+  attachments[1] = attachments_values[1];
+  rects[0].rect.offset = {0, 0};
+  rects[0].rect.extent = fh2_ff_.framebuffer.host_extent;
+  rects[0].baseArrayLayer = 0;
+  rects[0].layerCount = 1;
+  // End it: the next draw re-enters with the strip's render area.
+  command_processor_.SubmitBarriers(true);
+  fh2::rtlog::Log("FULL-FRAME fast clear color {:08X} depth {:08X}", fh2_ff_.color_clear,
+                  fh2_ff_.depth_clear);
+  return true;
 }
 
 void VulkanRenderTargetCache::Fh2FullFrameEnd(bool copy_strip_back, uint32_t strip_y) {

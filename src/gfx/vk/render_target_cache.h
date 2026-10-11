@@ -962,6 +962,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     bool is_depth = false;
     bool depth_float = false;
     uint32_t host_sample = 0;
+    // FH2 full-frame strips: read the full-frame image instead.
+    VkImage full_frame_image = VK_NULL_HANDLE;
+    VkDescriptorSet full_frame_set = VK_NULL_HANDLE;
     float scale = 1.0f;
     bool swap_red_blue = false;
   };
@@ -1004,7 +1007,29 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     uint32_t image_keys[2] = {};
     uint32_t image_width = 0, image_height = 0;  // guest pixels
     Framebuffer framebuffer;
+    // Sampling (direct resolves straight from the full frame).
+    VkImageView sample_views[2] = {};  // depth: depth aspect; color: as is
+    VkImageView stencil_view = VK_NULL_HANDLE;
+    size_t descriptor_indices[2] = {SIZE_MAX, SIZE_MAX};
+    // Strip rows already copied into the strip target ([index] = strip y + 1).
+    uint32_t strip_copied[2] = {};
+    // Clear values of the strip resolves (each strip starts from them); used
+    // to fast-clear the whole frame at the start of the next pass.
+    bool clear_values_known = false;
+    bool clear_values_trusted = true;
+    uint32_t color_clear = 0, color_clear_lo = 0, depth_clear = 0;
+    bool used_clear_values = false;
   };
+  bool Fh2FullFrameFastClear();
+ public:
+  // For direct resolves: the full-frame source in place of a strip target.
+  bool Fh2FullFrameSource(const VulkanRenderTarget* render_target, VkImage& image_out,
+                          VkDescriptorSet& set_out, uint32_t& strip_y_out) const;
+  void Fh2FullFrameEnsureStripCopied(const VulkanRenderTarget* render_target);
+  void Fh2FullFrameNoteResolveClear(uint32_t color_clear, uint32_t color_clear_lo,
+                                    uint32_t depth_clear);
+  uint32_t fh2_full_frame_strip_y_ = 0;
+ private:
   Fh2FullFrame fh2_ff_;
   bool Fh2FullFrameEnsureImages();
   void Fh2FullFrameSetStripArea(uint32_t strip_y);
