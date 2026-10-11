@@ -26,6 +26,14 @@ namespace rex::stream {
 class ByteStream;
 }  // namespace rex::stream
 
+namespace rex::memory {
+// Diagnostics for --log_fps: guest memory invalidations reported to the GPU
+// caches, by source. Returns a summary and resets the counters.
+enum class InvalidationSource : uint32_t { kWriteFault, kDecommit, kRelease, kProtect, kFileRead, kCount };
+void CountInvalidation(InvalidationSource source, uint64_t bytes);
+std::string TakeInvalidationStats(double window_seconds);
+}  // namespace rex::memory
+
 namespace rex::memory::detail {
 
 /// Compensates for host allocation granularity coarser than 4KB on the 0xE0

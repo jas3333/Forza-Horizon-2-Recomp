@@ -43,6 +43,29 @@ REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allo
 
 namespace rex::memory {
 
+namespace {
+std::atomic<uint64_t> g_invalidation_bytes[size_t(InvalidationSource::kCount)];
+std::atomic<uint64_t> g_invalidation_calls[size_t(InvalidationSource::kCount)];
+}  // namespace
+
+void CountInvalidation(InvalidationSource source, uint64_t bytes) {
+  g_invalidation_bytes[size_t(source)].fetch_add(bytes, std::memory_order_relaxed);
+  g_invalidation_calls[size_t(source)].fetch_add(1, std::memory_order_relaxed);
+}
+
+std::string TakeInvalidationStats(double window_seconds) {
+  static const char* const kNames[] = {"fault", "decommit", "release", "protect", "file"};
+  std::string out;
+  for (size_t i = 0; i < size_t(InvalidationSource::kCount); ++i) {
+    uint64_t bytes = g_invalidation_bytes[i].exchange(0);
+    uint64_t calls = g_invalidation_calls[i].exchange(0);
+    if (!calls) continue;
+    out += fmt::format(" {}={:.0f}/s:{:.1f}MB/s", kNames[i], calls / window_seconds,
+                       bytes / window_seconds / 1048576.0);
+  }
+  return out;
+}
+
 uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
   return rex::round_up(value, page_size) >> page_size_shift;
 }
@@ -556,6 +579,7 @@ bool Memory::AccessViolationCallback(std::unique_lock<rex::thread::global_mutex_
   // Will be rounded to physical page boundaries internally, so just pass 1 as
   // the length - guranteed not to cross page boundaries also.
   auto physical_heap = static_cast<PhysicalHeap*>(heap);
+  CountInvalidation(InvalidationSource::kWriteFault, system_page_size_);
   if (physical_heap->TriggerCallbacks(std::move(global_lock_locked_once), virtual_address, 1,
                                       is_write, false)) {
     return true;
@@ -2050,6 +2074,7 @@ bool PhysicalHeap::Decommit(uint32_t address, uint32_t size) {
   }
 
   // Not caring about the contents anymore.
+  CountInvalidation(InvalidationSource::kDecommit, size);
   TriggerCallbacks(std::move(global_lock), address, size, true, true);
 
   return BaseHeap::Decommit(address, size);
@@ -2074,6 +2099,7 @@ bool PhysicalHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   // thus callback handlers will keep considering this range valid forever.
   uint32_t region_size;
   if (QuerySize(base_address, &region_size)) {
+    CountInvalidation(InvalidationSource::kRelease, region_size);
     TriggerCallbacks(std::move(global_lock), base_address, region_size, true, true);
   }
 
@@ -2087,6 +2113,7 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   // Only invalidate if making writable again, for simplicity - not when simply
   // marking some range as immutable, for instance.
   if (protect & memory::kMemoryProtectWrite) {
+    CountInvalidation(InvalidationSource::kProtect, size);
     TriggerCallbacks(std::move(global_lock), address, size, true, true, false);
   }
 

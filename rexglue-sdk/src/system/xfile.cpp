@@ -165,6 +165,7 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
               size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
+              rex::memory::CountInvalidation(rex::memory::InvalidationSource::kFileRead, buffer_length);
               buffer_physical_heap->TriggerCallbacks(
                   rex::thread::global_critical_region::AcquireDirect(), buffer_guest_address,
                   buffer_length, true, true);

@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include <utility>
@@ -26,6 +27,11 @@
 REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
                     "Use sparse shared memory on Vulkan")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+namespace rex::graphics {
+// Bytes of guest memory copied to the GPU by shared memory uploads (--log_fps).
+std::atomic<uint64_t> g_shared_memory_upload_bytes{0};
+}  // namespace rex::graphics
 
 namespace rex::graphics::vulkan {
 
@@ -304,6 +310,7 @@ bool VulkanSharedMemory::UploadRanges(
       std::memcpy(upload_buffer_mapping,
                   memory().TranslatePhysical(upload_range_start << page_size_log2()),
                   upload_buffer_size);
+      g_shared_memory_upload_bytes.fetch_add(upload_buffer_size, std::memory_order_relaxed);
       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
         command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,

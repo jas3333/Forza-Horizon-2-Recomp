@@ -50,9 +50,13 @@ REXCVAR_DEFINE_BOOL(diag_gamma_ramp, false, "Diagnostics",
                     "them, at a few sample indices. Useful to rule out gamma-ramp-driven "
                     "color issues by confirming whether the ramp is identity (R=G=B).");
 
-REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
+// FH2: off, as in the user's Xenia config. On, it invalidated every page the
+// CPU had uploaded at each frame end, so FH2 re-uploaded ~600 MB/s of guest
+// memory (vs ~15 MB/s off; Xenia ~40 MB/s).
+REXCVAR_DEFINE_BOOL(clear_memory_page_state, false, "GPU",
                     "Refresh page-valid state from GPU-written memory at frame end. "
-                    "Disable for minor CPU overhead reduction, but may break memory coherency.")
+                    "Re-uploads all CPU-written pages every frame; only for titles "
+                    "whose writes the page watches miss.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(occlusion_query_enable, true, "GPU", "Enable host occlusion query handling")
@@ -103,6 +107,9 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace rex::graphics {
+extern std::atomic<uint64_t> g_shared_memory_upload_bytes;
+// --log_fps: draw packets processed (per 5 s window).
+static std::atomic<uint64_t> fh2_draw_packets_{0};
 
 using namespace rex::graphics::xenos;
 
@@ -1035,8 +1042,11 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
     ++frames;
     double window_s = std::chrono::duration<double>(now - window_start).count();
     if (window_s >= 5.0) {
-      REXGPU_INFO("[FPS] {:.1f} fps (avg {:.1f} ms, worst {:.1f} ms over {:.1f} s)",
-                  frames / window_s, 1000.0 * window_s / frames, worst_ms, window_s);
+      REXGPU_INFO("[FPS] {:.1f} fps (avg {:.1f} ms, worst {:.1f} ms over {:.1f} s) draws/frame {:.0f} uploads {:.1f} MB/s; invalidations:{}",
+                  frames / window_s, 1000.0 * window_s / frames, worst_ms, window_s,
+                  double(fh2_draw_packets_.exchange(0)) / frames,
+                  double(g_shared_memory_upload_bytes.exchange(0)) / window_s / 1048576.0,
+                  rex::memory::TakeInvalidationStats(window_s));
       window_start = now;
       frames = 0;
       worst_ms = 0.0;
@@ -1384,6 +1394,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuffer* re
 bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32_t packet,
                                               const char* opcode_name, uint32_t viz_query_condition,
                                               uint32_t count_remaining) {
+  fh2_draw_packets_.fetch_add(1, std::memory_order_relaxed);
   if (REXCVAR_GET(diag_draw_rate)) {
     static std::atomic<uint64_t> draw_packet_count{0};
     static auto last_report = std::chrono::steady_clock::now();
