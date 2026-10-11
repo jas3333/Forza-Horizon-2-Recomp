@@ -13,6 +13,12 @@
 #include <rex/system/xobject.h>
 #include <rex/system/xthread.h>
 #include <rex/kernel/crt/heap.h>
+#include <rex/system/xmemory.h>
+#include <rex/ui/keybinds.h>
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include "diagnostics/heap_tracker.h"
 
@@ -1067,3 +1073,139 @@ struct ShaderMemoryScanner {
   }
 } g_shader_memory_scanner;
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Debug: find and move the game clock (time of day).
+//
+//   F9   scan: snapshot every committed guest float in (0, 24], then every
+//        10 s for 60 s keep those that rise steadily at a constant rate
+//        (the time of day does; little else does). Logs [TODSCAN] candidates.
+//   F10  select the next candidate (logged).
+//   F11  move the selected value forward one hour (1.0 if it looks like
+//        hours, 1/24 if it looks like a 0..1 fraction of the day).
+//
+// FH2_TOD_ADDR=<hex> preselects an address (e.g. one found earlier), so F11
+// works immediately without a scan.
+namespace {
+struct TodCandidate {
+  uint32_t addr;
+  float first, last, delta0;
+};
+std::mutex g_tod_mutex;
+std::vector<TodCandidate> g_tod_candidates;
+std::atomic<bool> g_tod_scanning{false};
+uint32_t g_tod_selected = 0;
+size_t g_tod_index = 0;
+
+float TodRead(rex::memory::Memory* mem, uint32_t addr) {
+  uint32_t v = __builtin_bswap32(*mem->TranslateVirtual<uint32_t*>(addr));
+  float f;
+  std::memcpy(&f, &v, 4);
+  return f;
+}
+void TodWrite(rex::memory::Memory* mem, uint32_t addr, float f) {
+  uint32_t v;
+  std::memcpy(&v, &f, 4);
+  *mem->TranslateVirtual<uint32_t*>(addr) = __builtin_bswap32(v);
+}
+
+template <typename Fn>
+void TodForEachCommittedRegion(rex::memory::Memory* mem, Fn&& fn) {
+  // Virtual guest space only (0xA0000000+ mirrors physical memory).
+  for (uint64_t a = 0x00010000; a < 0xA0000000ull;) {
+    auto* heap = mem->LookupHeap(uint32_t(a));
+    rex::memory::HeapAllocationInfo info{};
+    if (!heap || !heap->QueryRegionInfo(uint32_t(a), &info) || !info.region_size) {
+      a += 0x10000;
+      continue;
+    }
+    if ((info.state & rex::memory::kMemoryAllocationCommit) &&
+        (info.protect & rex::memory::kMemoryProtectRead)) {
+      fn(info.base_address, info.region_size);
+    }
+    a = std::max<uint64_t>(a + 0x1000, uint64_t(info.base_address) + info.region_size);
+  }
+}
+
+void TodScan() {
+  auto* mem = rex::system::kernel_state()->memory();
+  std::vector<TodCandidate> cands;
+  TodForEachCommittedRegion(mem, [&](uint32_t base, uint32_t size) {
+    for (uint32_t off = 0; off + 4 <= size; off += 4) {
+      float f = TodRead(mem, base + off);
+      if (std::isfinite(f) && f > 0.0001f && f <= 24.0f) {
+        cands.push_back({base + off, f, f, 0.0f});
+      }
+    }
+  });
+  REXLOG_INFO("[TODSCAN] snapshot 0: {} values in (0, 24]", cands.size());
+  for (int pass = 1; pass <= 6; ++pass) {
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    std::vector<TodCandidate> kept;
+    for (TodCandidate c : cands) {
+      // Region may have been freed since: re-check it is still readable.
+      auto* heap = mem->LookupHeap(c.addr);
+      rex::memory::HeapAllocationInfo info{};
+      if (!heap || !heap->QueryRegionInfo(c.addr, &info) ||
+          !(info.state & rex::memory::kMemoryAllocationCommit) ||
+          !(info.protect & rex::memory::kMemoryProtectRead)) {
+        continue;
+      }
+      float v = TodRead(mem, c.addr);
+      float d = v - c.last;
+      if (!std::isfinite(v) || d <= 0.0f || d > 1.0f) continue;
+      if (pass == 1) {
+        c.delta0 = d;
+      } else if (d < c.delta0 * 0.7f || d > c.delta0 * 1.4f) {
+        continue;
+      }
+      c.last = v;
+      kept.push_back(c);
+    }
+    cands.swap(kept);
+    REXLOG_INFO("[TODSCAN] pass {}: {} candidates rising steadily", pass, cands.size());
+  }
+  for (size_t i = 0; i < cands.size() && i < 60; ++i) {
+    const TodCandidate& c = cands[i];
+    REXLOG_INFO("[TODSCAN] #{} {:08X}: {:.4f} -> {:.4f} ({:.5f} per minute)", i, c.addr, c.first,
+                c.last, (c.last - c.first) / 1.0f);
+  }
+  std::lock_guard<std::mutex> lock(g_tod_mutex);
+  g_tod_candidates = std::move(cands);
+  g_tod_index = 0;
+  if (!g_tod_candidates.empty()) {
+    g_tod_selected = g_tod_candidates[0].addr;
+    REXLOG_INFO("[TODSCAN] selected #0 {:08X} (F10 next, F11 +1 hour)", g_tod_selected);
+  }
+  g_tod_scanning = false;
+}
+}  // namespace
+
+void InstallFh2DebugTools() {
+  if (const char* env = std::getenv("FH2_TOD_ADDR")) {
+    g_tod_selected = uint32_t(std::strtoul(env, nullptr, 16));
+  }
+  rex::ui::RegisterBind("bind_fh2_tod_scan", "F9", "FH2: find the game clock (60 s)", [] {
+    if (g_tod_scanning.exchange(true)) return;
+    REXLOG_INFO("[TODSCAN] scanning for the game clock: keep driving in free roam for 60 s");
+    std::thread(TodScan).detach();
+  });
+  rex::ui::RegisterBind("bind_fh2_tod_next", "F10", "FH2: next game clock candidate", [] {
+    std::lock_guard<std::mutex> lock(g_tod_mutex);
+    if (g_tod_candidates.empty()) return;
+    g_tod_index = (g_tod_index + 1) % g_tod_candidates.size();
+    g_tod_selected = g_tod_candidates[g_tod_index].addr;
+    REXLOG_INFO("[TODSCAN] selected #{} {:08X}", g_tod_index, g_tod_selected);
+  });
+  rex::ui::RegisterBind("bind_fh2_tod_forward", "F11", "FH2: move the game clock +1 hour", [] {
+    if (!g_tod_selected) return;
+    auto* mem = rex::system::kernel_state()->memory();
+    float v = TodRead(mem, g_tod_selected);
+    float step = v <= 1.0f ? 1.0f / 24.0f : 1.0f;
+    float limit = v <= 1.0f ? 1.0f : 24.0f;
+    float nv = v + step;
+    if (nv >= limit) nv -= limit;
+    TodWrite(mem, g_tod_selected, nv);
+    REXLOG_INFO("[TODSCAN] {:08X}: {:.4f} -> {:.4f}", g_tod_selected, v, nv);
+  });
+}

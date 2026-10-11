@@ -17,6 +17,7 @@
 
 // Defined in forzahorizon2_hooks.cpp.
 void InstallGuestPageFaultRecovery();
+void InstallFh2DebugTools();
 
 // Xbox Live Hive / Cloud sync offline handler
 static void Hook_sub_82D9F3E0(PPCContext& ctx, uint8_t* base) {
@@ -114,6 +115,7 @@ class Forzahorizon2App : public rex::ReXApp {
   // OnPreLaunchModule - register function hooks and extra symbolic aliases
   void OnPreLaunchModule() override {
     InstallGuestPageFaultRecovery();
+    InstallFh2DebugTools();
 
     auto* ks = rex::system::kernel_state();
     if (ks && ks->file_system()) {
