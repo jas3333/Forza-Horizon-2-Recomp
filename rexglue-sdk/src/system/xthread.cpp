@@ -147,7 +147,9 @@ XThread* GetBoundCurrentXThread() {
 
 }  // namespace
 
-void PollCheckpointBoundary(PPCContext& context, uint32_t guest_address) {
+std::atomic<bool> g_checkpoint_probe_requested{false};
+
+void PollCheckpointBoundarySlow(PPCContext& context, uint32_t guest_address) {
   if (!checkpoint_probe.requested.load(std::memory_order_acquire) || !XThread::IsInThread()) {
     return;
   }
@@ -199,6 +201,7 @@ CheckpointProbeResult ProbeMainThreadCheckpoint(uint32_t timeout_ms) {
   checkpoint_probe.guest_lr = 0;
   checkpoint_probe.guest_stack_pointer = 0;
   checkpoint_probe.requested.store(true, std::memory_order_release);
+  g_checkpoint_probe_requested.store(true, std::memory_order_release);
   const bool reached = checkpoint_probe.condition.wait_for(
       lock, std::chrono::milliseconds(timeout_ms), [] { return checkpoint_probe.parked; });
   if (reached) {
@@ -242,6 +245,7 @@ CheckpointProbeResult ProbeMainThreadCheckpoint(uint32_t timeout_ms) {
     }
   }
   checkpoint_probe.requested.store(false, std::memory_order_release);
+  g_checkpoint_probe_requested.store(false, std::memory_order_release);
   checkpoint_probe.condition.notify_all();
   if (reached) {
     checkpoint_probe.condition.wait_for(

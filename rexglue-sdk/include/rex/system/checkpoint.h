@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -75,8 +76,18 @@ struct CheckpointProbeResult {
   uint32_t debug_probe_object_field0 = 0;
 };
 
-/** Called at the entry of each generated guest function. */
-void PollCheckpointBoundary(PPCContext& context, uint32_t guest_address);
+/** Set while a checkpoint probe waits for a thread to reach a boundary. */
+extern std::atomic<bool> g_checkpoint_probe_requested;
+void PollCheckpointBoundarySlow(PPCContext& context, uint32_t guest_address);
+
+/** Called at the entry of each generated guest function. Inline flag check:
+ *  the out-of-line call into the runtime on every guest function entry was
+ *  ~11% of FH2's busiest game thread. */
+inline void PollCheckpointBoundary(PPCContext& context, uint32_t guest_address) {
+  if (__builtin_expect(g_checkpoint_probe_requested.load(std::memory_order_relaxed), 0)) {
+    PollCheckpointBoundarySlow(context, guest_address);
+  }
+}
 
 /** Park and resume the main guest thread at a generated function boundary. */
 CheckpointProbeResult ProbeMainThreadCheckpoint(uint32_t timeout_ms = 2000);
