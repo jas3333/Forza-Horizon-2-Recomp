@@ -287,6 +287,7 @@ class CommandProcessor {
   // Set by backend command processors to their legacy memexport readback cvar
   // name (for explicit-override compatibility).
   const char* legacy_readback_memexport_cvar_name_ = nullptr;
+  mutable int legacy_readback_memexport_set_ = -1;
 
  private:
   reg::DC_LUT_30_COLOR gamma_ramp_256_entry_table_[256] = {};

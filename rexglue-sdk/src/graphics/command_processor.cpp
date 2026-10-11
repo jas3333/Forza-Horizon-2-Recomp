@@ -205,8 +205,11 @@ void CommandProcessor::InvalidateGpuMemory() {}
 ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
     bool legacy_readback_resolve_enabled) const {
   ReadbackResolveMode shared_mode = ParseReadbackResolveMode(REXCVAR_GET(readback_resolve));
-  bool shared_mode_overrides_legacy = shared_mode != ReadbackResolveMode::kDisabled ||
-                                      rex::cvar::HasNonDefaultValue("readback_resolve");
+  // Whether the cvar was set doesn't change at runtime; the lookup is a string
+  // hash map access, and this runs for every resolve.
+  static const bool readback_resolve_set = rex::cvar::HasNonDefaultValue("readback_resolve");
+  bool shared_mode_overrides_legacy =
+      shared_mode != ReadbackResolveMode::kDisabled || readback_resolve_set;
   if (shared_mode_overrides_legacy) {
     return shared_mode;
   }
@@ -220,8 +223,16 @@ uint32_t CommandProcessor::GetReadbackResolveSizeLimit() const {
 }
 
 bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
-  if (legacy_readback_memexport_cvar_name_ &&
-      rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
+  // Per draw: cache the (string-keyed) lookup -- the cvar's set-ness doesn't
+  // change at runtime.
+  if (legacy_readback_memexport_set_ < 0) {
+    legacy_readback_memexport_set_ =
+        legacy_readback_memexport_cvar_name_ &&
+                rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)
+            ? 1
+            : 0;
+  }
+  if (legacy_readback_memexport_set_ > 0) {
     return legacy_backend_flag;
   }
   return REXCVAR_GET(readback_memexport);
