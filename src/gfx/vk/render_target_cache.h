@@ -1016,9 +1016,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     // Clear values of the strip resolves (each strip starts from them); used
     // to fast-clear the whole frame at the start of the next pass.
     bool clear_values_known = false;
-    bool clear_values_trusted = true;
+    // Passes in a row whose strip clears matched the previous values; fast
+    // clears are used from 2 on (scene changes switch clear values).
+    uint32_t clear_values_stable = 0;
     uint32_t color_clear = 0, color_clear_lo = 0, depth_clear = 0;
     bool used_clear_values = false;
+    bool clear_values_checked = false;
   };
   bool Fh2FullFrameFastClear();
  public:

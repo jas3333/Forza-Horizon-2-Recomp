@@ -7644,7 +7644,7 @@ void VulkanRenderTargetCache::Fh2FullFrameCopyRows(uint32_t index, bool to_full_
 void VulkanRenderTargetCache::Fh2FullFrameSetStripArea(uint32_t strip_y) {
   strip_y = std::min(strip_y, fh2_ff_.height - 1);
   uint32_t rows = std::min(fh2_ff_.strip_height, fh2_ff_.height - strip_y);
-  if (fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0) == 2) {
+  if (fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2) == 2) {
     // Dedup draws reach down to the bottom of the frame.
     rows = fh2_ff_.height - strip_y;
   }
@@ -7703,8 +7703,9 @@ bool VulkanRenderTargetCache::Fh2FullFrameBegin(uint32_t frame_width, uint32_t f
   // Every strip starts from the same (cleared) state as strip 0 does now.
   // With the strip clear values known from earlier passes, fast-clear the
   // frame; otherwise replicate the strip target over it.
-  fh2_ff_.used_clear_values = fh2_ff_.clear_values_known && fh2_ff_.clear_values_trusted &&
+  fh2_ff_.used_clear_values = fh2_ff_.clear_values_known && fh2_ff_.clear_values_stable >= 2 &&
                               Fh2FullFrameFastClear();
+  fh2_ff_.clear_values_checked = false;
   if (!fh2_ff_.used_clear_values) {
     for (uint32_t i = 0; i < 2; ++i) {
       for (uint32_t y = 0; y < frame_height; y += strip_height) {
@@ -7773,12 +7774,19 @@ void VulkanRenderTargetCache::Fh2FullFrameNoteResolveClear(uint32_t color_clear,
   if (!fh2_ff_.active) {
     return;
   }
-  if (fh2_ff_.used_clear_values &&
-      (color_clear != fh2_ff_.color_clear || color_clear_lo != fh2_ff_.color_clear_lo ||
-       depth_clear != fh2_ff_.depth_clear)) {
-    // The values used for this pass's fast clear were wrong: copy from now on.
-    fh2_ff_.clear_values_trusted = false;
-    REXGPU_WARN("fh2gfx: full-frame strip clear values changed; using copies");
+  bool same = fh2_ff_.clear_values_known && color_clear == fh2_ff_.color_clear &&
+              color_clear_lo == fh2_ff_.color_clear_lo && depth_clear == fh2_ff_.depth_clear;
+  if (!fh2_ff_.clear_values_checked) {
+    // Once per pass (the first strip resolve).
+    fh2_ff_.clear_values_checked = true;
+    if (same) {
+      ++fh2_ff_.clear_values_stable;
+    } else {
+      if (fh2_ff_.used_clear_values) {
+        REXGPU_INFO("fh2gfx: full-frame strip clear values changed; copying until stable");
+      }
+      fh2_ff_.clear_values_stable = 0;
+    }
   }
   fh2_ff_.color_clear = color_clear;
   fh2_ff_.color_clear_lo = color_clear_lo;

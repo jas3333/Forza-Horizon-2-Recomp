@@ -3761,7 +3761,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   uint64_t fh2_draw_fingerprint = 0;
   bool fh2_dedup_draw = false;
   if (fh2_bin_strip_ && render_target_cache_->Fh2FullFrameActive() && !memexport_used_vertex &&
-      !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0) == 2 &&
+      !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2) == 2 &&
       !Fh2DrawBlends()) {
     if (fh2_full_frame_pass_ != fh2::rtlog::g_counters.full_frame_passes) {
       fh2_full_frame_pass_ = fh2::rtlog::g_counters.full_frame_passes;
@@ -3944,7 +3944,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
 
   // FH2 full-frame strips.
   Fh2FullFrameRegisterOverride fh2_full_frame_override(*register_file_);
-  if (fh2_bin_strip_ && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 0)) {
+  if (fh2_bin_strip_ && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2)) {
     auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
     uint32_t strip_y = uint32_t(std::max(-int32_t(window_offset.window_y_offset), 0));
     if (render_target_cache_->Fh2FullFrameActive() &&
