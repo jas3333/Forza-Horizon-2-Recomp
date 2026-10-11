@@ -12,6 +12,8 @@
 #include <rex/rex_app.h>
 
 #include <cstdlib>
+#include <vector>
+#include <cstdio>
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -38,6 +40,7 @@
 #include <rex/system/xthread.h>
 #include <rex/ui/graphics_provider.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/presenter.h>
 #include <rex/version.h>
 
 #include <fmt/format.h>
@@ -609,6 +612,39 @@ std::function<void(PathConfig)> ReXApp::MakeResumeCallback() {
 }
 
 void ReXApp::OnKeyDown(ui::KeyEvent& e) {
+  // F12: save the guest output (full internal resolution, before any window
+  // scaling) as a PPM in ./screenshots next to the working directory.
+  if (e.virtual_key() == ui::VirtualKey::kF12 && !e.prev_state()) {
+    auto* graphics_system = config_.graphics.get();
+    rex::ui::RawImage image;
+    if (graphics_system && graphics_system->presenter() &&
+        graphics_system->presenter()->CaptureGuestOutput(image) && image.width && image.height) {
+      std::filesystem::create_directories("screenshots");
+      auto now = std::chrono::system_clock::now().time_since_epoch();
+      std::string path = fmt::format(
+          "screenshots/shot-{}.ppm",
+          std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
+      if (FILE* file = std::fopen(path.c_str(), "wb")) {
+        std::fprintf(file, "P6\n%u %u\n255\n", image.width, image.height);
+        std::vector<uint8_t> row(size_t(image.width) * 3);
+        for (uint32_t y = 0; y < image.height; ++y) {
+          const uint8_t* source = image.data.data() + y * image.stride;
+          for (uint32_t x = 0; x < image.width; ++x) {
+            row[x * 3 + 0] = source[x * 4 + 0];
+            row[x * 3 + 1] = source[x * 4 + 1];
+            row[x * 3 + 2] = source[x * 4 + 2];
+          }
+          std::fwrite(row.data(), 1, row.size(), file);
+        }
+        std::fclose(file);
+        REXLOG_INFO("Screenshot saved: {} ({}x{})", path, image.width, image.height);
+      }
+    } else {
+      REXLOG_WARN("Screenshot failed: no guest output to capture");
+    }
+    e.set_handled(true);
+    return;
+  }
   rex::ui::ProcessKeyEvent(e);
 }
 
