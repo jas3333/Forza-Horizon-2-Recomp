@@ -135,7 +135,37 @@ std::vector<TransferModeStep> ParseTransferModes() {
 const std::vector<TransferModeStep> g_transfer_steps = ParseTransferModes();
 }  // namespace
 
+int TimedEnvIntUncached(const char* name, int default_value);
+
 int TimedEnvInt(const char* name, int default_value) {
+  // Per-draw callers: answer from a per-frame cache keyed by the (literal)
+  // name pointer; the parse and the clock read happen once per frame.
+  struct CacheEntry {
+    const char* name;
+    int default_value;
+    uint64_t frame;
+    int value;
+  };
+  static CacheEntry cache[16];
+  static uint32_t cache_size = 0;
+  for (uint32_t i = 0; i < cache_size; ++i) {
+    CacheEntry& entry = cache[i];
+    if (entry.name == name && entry.default_value == default_value) {
+      if (entry.frame != g_frame) {
+        entry.frame = g_frame;
+        entry.value = TimedEnvIntUncached(name, default_value);
+      }
+      return entry.value;
+    }
+  }
+  int value = TimedEnvIntUncached(name, default_value);
+  if (cache_size < 16) {
+    cache[cache_size++] = {name, default_value, g_frame, value};
+  }
+  return value;
+}
+
+int TimedEnvIntUncached(const char* name, int default_value) {
   struct Step {
     double from_seconds;
     int value;

@@ -2317,7 +2317,38 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
     return;
   }
 
-  CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+  // A mixed range: split at the constant blocks so each part takes the bulk
+  // paths above; plain registers need only the base handling (the override
+  // adds behavior for constant ranges alone), without a virtual call each.
+  static constexpr std::pair<uint32_t, uint32_t> kBlocks[] = {
+      {XE_GPU_REG_SHADER_CONSTANT_000_X, XE_GPU_REG_SHADER_CONSTANT_511_W},
+      {XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031, XE_GPU_REG_SHADER_CONSTANT_LOOP_31},
+      {XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0, XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5}};
+  uint32_t index = start_index;
+  while (index <= end_index) {
+    const std::pair<uint32_t, uint32_t>* block = nullptr;
+    uint32_t next_block_start = UINT32_MAX;
+    for (const auto& candidate : kBlocks) {
+      if (index >= candidate.first && index <= candidate.second) {
+        block = &candidate;
+        break;
+      }
+      if (candidate.first > index) {
+        next_block_start = std::min(next_block_start, candidate.first);
+      }
+    }
+    if (block) {
+      uint32_t last = std::min(end_index, block->second);
+      WriteRegistersFromMem(index, base + (index - start_index), last - index + 1);
+      index = last + 1;
+    } else {
+      uint32_t last = std::min(end_index, next_block_start - 1);
+      for (; index <= last; ++index) {
+        CommandProcessor::WriteRegister(
+            index, memory::load_and_swap<uint32_t>(base + (index - start_index)));
+      }
+    }
+  }
 }
 
 void VulkanCommandProcessor::SparseBindBuffer(VkBuffer buffer, uint32_t bind_count,
@@ -5305,15 +5336,23 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
 }
 
 void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
-  auto fh2_fence_wait_start = std::chrono::steady_clock::now();
+  // Time only calls that may block (diagnostics; clock reads per draw cost
+  // a few percent of the thread).
   struct Fh2FenceWaitTimer {
+    bool timing;
     std::chrono::steady_clock::time_point start;
     ~Fh2FenceWaitTimer() {
-      fh2::rtlog::g_counters.fence_wait_ns += uint64_t(
-          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
-              .count());
+      if (timing) {
+        fh2::rtlog::g_counters.fence_wait_ns += uint64_t(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 start)
+                .count());
+      }
     }
-  } fh2_fence_wait_timer{fh2_fence_wait_start};
+  } fh2_fence_wait_timer{await_submission > submission_completed_,
+                         await_submission > submission_completed_
+                             ? std::chrono::steady_clock::now()
+                             : std::chrono::steady_clock::time_point()};
   // Only report once, no need to retry a wait that won't succeed anyway.
   if (device_lost_) {
     return;

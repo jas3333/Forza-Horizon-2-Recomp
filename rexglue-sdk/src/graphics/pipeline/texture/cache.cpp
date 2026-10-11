@@ -764,13 +764,19 @@ void TextureCache::DestroyAllTextures(bool from_destructor) {
 TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
   // Check if the texture is a scaled resolve texture.
   if (IsDrawResolutionScaled() && key.tiled && IsScaledResolveSupportedForFormat(key)) {
-    texture_util::TextureGuestLayout scaled_resolve_guest_layout = key.GetGuestLayout();
-    if ((scaled_resolve_guest_layout.base.level_data_extent_bytes &&
-         IsRangeScaledResolved(key.base_page << 12,
-                               scaled_resolve_guest_layout.base.level_data_extent_bytes)) ||
-        (scaled_resolve_guest_layout.mips_total_extent_bytes &&
-         IsRangeScaledResolved(key.mip_page << 12,
-                               scaled_resolve_guest_layout.mips_total_extent_bytes))) {
+    // The layout depends only on the key: memoized (computing it was ~3% of
+    // the GPU thread, as this runs on every binding change).
+    auto layout_it = guest_layout_extents_.find(key);
+    if (layout_it == guest_layout_extents_.end()) {
+      texture_util::TextureGuestLayout layout = key.GetGuestLayout();
+      layout_it = guest_layout_extents_
+                      .emplace(key, std::make_pair(layout.base.level_data_extent_bytes,
+                                                   layout.mips_total_extent_bytes))
+                      .first;
+    }
+    uint32_t base_extent = layout_it->second.first, mips_extent = layout_it->second.second;
+    if ((base_extent && IsRangeScaledResolved(key.base_page << 12, base_extent)) ||
+        (mips_extent && IsRangeScaledResolved(key.mip_page << 12, mips_extent))) {
       key.scaled_resolve = 1;
     }
   }

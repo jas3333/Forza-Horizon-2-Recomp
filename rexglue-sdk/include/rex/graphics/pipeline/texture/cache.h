@@ -609,6 +609,9 @@ class TextureCache {
   uint64_t current_submission_time_ = 0;
 
   std::unordered_map<TextureKey, std::unique_ptr<Texture>, TextureKey::Hasher> textures_;
+  // Guest base / mips extents per key (FindOrCreateTexture's scaled-resolve check).
+  std::unordered_map<TextureKey, std::pair<uint32_t, uint32_t>, TextureKey::Hasher>
+      guest_layout_extents_;
 
   uint64_t textures_total_host_memory_usage_ = 0;
 

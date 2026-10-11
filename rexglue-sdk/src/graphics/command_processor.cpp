@@ -1139,7 +1139,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
 
   bool matched = false;
   uint32_t wait_polls = 0;
-  auto first_wait_start = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point first_wait_start;
   do {
     uint32_t value = 0;
     if (is_memory) {
@@ -1183,6 +1183,9 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       // Wait.
       if (wait >= 0x100) {
         auto wait_start = std::chrono::steady_clock::now();
+        if (!wait_polls) {
+          first_wait_start = wait_start;
+        }
         PrepareForWait();
         if (!REXCVAR_GET(vsync) || wait_polls < 64) {
           // Spin (yielding) first: the awaited value usually arrives within
