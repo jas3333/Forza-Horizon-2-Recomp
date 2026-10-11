@@ -3524,6 +3524,12 @@ bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t de
       auto global_lock = rex::thread::global_critical_region::AcquireDirect();
       if ((!covers_all && texture->base_outdated(global_lock)) ||
           (texture->GetGuestMipsSize() && texture->mips_outdated(global_lock))) {
+        fh2::rtlog::Log("    target {:08X} {}x{} fmt {} rejected: {}{}", base, key.GetWidth(),
+                        key.GetHeight(), uint32_t(key.format),
+                        texture->base_outdated(global_lock) ? "base outdated" : "",
+                        texture->GetGuestMipsSize() && texture->mips_outdated(global_lock)
+                            ? " mips outdated"
+                            : "");
         continue;
       }
     }
