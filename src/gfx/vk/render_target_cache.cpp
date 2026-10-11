@@ -6518,7 +6518,9 @@ void main() {
   float depth = texelFetch(src, c.src_offset + p, 0).r;
 #endif
 #if FLOAT24
-  float value = Float20e4To32(Float32To20e4(depth));
+  // Host float depth is the guest's [0, 2) range remapped to [0, 1) (the
+  // EDRAM dump encodes with remap_from_0_to_0_5); doubling is exact.
+  float value = Float20e4To32(Float32To20e4(depth * 2.0));
 #else
   // Like the EDRAM dump (round to nearest even) and xenos::UNorm24To32.
   uint n24 = uint(roundEven(depth * 16777215.0));
