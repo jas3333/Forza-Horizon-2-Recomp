@@ -708,7 +708,16 @@ extern "C" REX_FUNC(sub_83134710) {
   __imp__sub_83134710(ctx, base);
 }
 
-// Fixed Signed-In profile (FabioAP, XUID: 0xB13EBABEBABEBABE)
+// Signed-in profile 0: gamertag and XUID come from the SDK's user_name /
+// user_xuid settings (UserProfile), default "User" / 0xB13EBABEBABEBABE.
+// Saves are keyed by the XUID, so changing the name keeps them.
+static void CopyGamertag(uint8_t* dst, uint32_t capacity) {
+  std::string name = rex::system::kernel_state()->user_profile()->name();
+  size_t n = std::min<size_t>(name.size(), capacity ? capacity - 1 : 0);
+  std::memcpy(dst, name.data(), n);
+  std::memset(dst + n, 0, capacity - n);
+}
+
 extern "C" void __imp__XamUserGetSigninState(PPCContext& ctx, uint8_t* base) {
   (void)base;
   uint32_t user_index = ctx.r3.u32;
@@ -723,8 +732,8 @@ extern "C" void __imp__XamUserGetName(PPCContext& ctx, uint8_t* base) {
   uint32_t user_index = ctx.r3.u32;
   uint32_t buffer_ptr = ctx.r4.u32;
   uint32_t buffer_len = ctx.r5.u32;
-  if (user_index == 0 && buffer_ptr != 0 && buffer_len >= 8) {
-    std::memcpy(base + buffer_ptr, "FabioAP\0", 8);
+  if (user_index == 0 && buffer_ptr != 0 && buffer_len >= 1) {
+    CopyGamertag(base + buffer_ptr, std::min<uint32_t>(buffer_len, 16));
     ctx.r3.u64 = 0; // ERROR_SUCCESS
   } else {
     ctx.r3.u64 = 0x57;
@@ -743,7 +752,7 @@ extern "C" void __imp__XamUserGetSigninInfo(PPCContext& ctx, uint8_t* base) {
     *reinterpret_cast<uint32_t*>(base + info_ptr + 12) = __builtin_bswap32(1);
     *reinterpret_cast<uint32_t*>(base + info_ptr + 16) = 0;
     *reinterpret_cast<uint32_t*>(base + info_ptr + 20) = 0;
-    std::memcpy(base + info_ptr + 24, "FabioAP\0", 8);
+    CopyGamertag(base + info_ptr + 24, 16);  // XUSER_SIGNIN_INFO::szUserName[16]
     ctx.r3.u64 = 0; // ERROR_SUCCESS
   } else {
     ctx.r3.u64 = 0x57;
