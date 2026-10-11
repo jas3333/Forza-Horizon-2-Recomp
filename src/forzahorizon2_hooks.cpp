@@ -1498,31 +1498,26 @@ void InstallFh2ClockWatchKey() {
 }
 
 // ---------------------------------------------------------------------------
-// Time-of-day override. sub_82F51E48 is the game-side proxy of the render
-// environment setter (sub_82EDAD38): it packs its arguments into a deferred
-// call. The time of day (fraction of a day) is the float argument at the
-// caller's [r1+140] on entry. 'tod <fraction>' on the debug channel forces it,
-// 'tod off' restores the game's value. The first call logs the caller (the
-// code computing the environment).
-std::atomic<float> g_tod_override{-1.0f};
-extern "C" void __imp__sub_82F51E48(PPCContext& ctx, uint8_t* base);
-extern "C" REX_FUNC(sub_82F51E48) {
-  static std::atomic<int> logged{0};
-  uint32_t slot = ctx.r1.u32 + 140;
-  uint32_t raw = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + slot));
-  float game_tod;
-  std::memcpy(&game_tod, &raw, 4);
-  if (logged.fetch_add(1) == 0) {
-    REXLOG_INFO("[TOD] environment proxy called from lr={:08X}, time of day {:.4f}",
-                uint32_t(ctx.lr), game_tod);
+// Time of day. sub_82686CC8 is the time-of-day update: the clock is a float
+// in seconds at this+10488 (wraps at 86400), advanced by rate(this+10492) x
+// frame time, and crossing 72000 s (20:00) fires the "getting dark" switch.
+// The hook remembers the clock object; 'tod <hours>' on the debug channel sets
+// the clock (it keeps running from there), 'tod' alone logs it.
+std::atomic<uint32_t> g_tod_object{0};
+std::atomic<float> g_tod_set_seconds{-1.0f};
+extern "C" void __imp__sub_82686CC8(PPCContext& ctx, uint8_t* base);
+extern "C" REX_FUNC(sub_82686CC8) {
+  uint32_t self = ctx.r3.u32;
+  if (g_tod_object.exchange(self) != self) {
+    REXLOG_INFO("[TOD] clock object {:08X}", self);
   }
-  float o = g_tod_override.load(std::memory_order_relaxed);
-  if (o >= 0.0f) {
+  float set = g_tod_set_seconds.exchange(-1.0f);
+  if (set >= 0.0f) {
     uint32_t v;
-    std::memcpy(&v, &o, 4);
-    *reinterpret_cast<uint32_t*>(base + slot) = __builtin_bswap32(v);
+    std::memcpy(&v, &set, 4);
+    *reinterpret_cast<uint32_t*>(base + self + 10488) = __builtin_bswap32(v);
   }
-  __imp__sub_82F51E48(ctx, base);
+  __imp__sub_82686CC8(ctx, base);
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,7 +1528,7 @@ extern "C" REX_FUNC(sub_82F51E48) {
 //   peek <hex> [n]      log n 32-bit words (hex and float) at a guest address
 //   poke <hex> <float>  write a float to a guest address
 //   watch <hex>         hardware write watchpoint on a guest address (logs writers)
-//   tod <frac|hours|off> force the render time of day (e.g. tod 23.5)
+//   tod [hours]         set the game clock (e.g. tod 19.9), or log it
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1595,16 +1590,21 @@ void CtlCommand(const std::string& line) {
   } else if (cmd == "tod") {
     std::string v;
     in >> v;
-    if (v == "off") {
-      g_tod_override = -1.0f;
-      REXLOG_INFO("[CTL] tod: game clock");
-    } else {
-      float f = std::strtof(v.c_str(), nullptr);
-      if (f > 1.0f) f /= 24.0f;  // allow hours (e.g. 23.5)
-      g_tod_override = std::fmod(std::max(f, 0.0f), 1.0f);
-      REXLOG_INFO("[CTL] tod: forced {:.4f} ({:.2f} h)", g_tod_override.load(),
-                  g_tod_override.load() * 24.0f);
+    uint32_t obj = g_tod_object.load();
+    if (!obj) {
+      REXLOG_INFO("[CTL] tod: clock not running yet (load into free roam)");
+      return;
     }
+    if (v.empty()) {
+      float now = TodRead(mem, obj + 10488);
+      REXLOG_INFO("[CTL] tod: {:.0f} s = {:02d}:{:02d}", now, int(now / 3600) % 24,
+                  int(now / 60) % 60);
+      return;
+    }
+    float hours = std::fmod(std::max(std::strtof(v.c_str(), nullptr), 0.0f), 24.0f);
+    g_tod_set_seconds = hours * 3600.0f;
+    REXLOG_INFO("[CTL] tod: clock set to {:02d}:{:02d}", int(hours) % 24,
+                int(hours * 60) % 60);
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);
