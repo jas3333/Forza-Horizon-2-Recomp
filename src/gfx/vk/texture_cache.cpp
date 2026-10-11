@@ -1242,7 +1242,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     ++counters.tex_loads;
     counters.tex_load_bytes += size;
     counters.tex_loads_resolved += from_resolve;
-    if (from_resolve) {
+    // Readers that can't be written directly (mip levels, cube faces,
+    // array/3D slices) must keep their memory written even when the range
+    // isn't a known resolve destination yet: the car's reflection cube map
+    // loaded its mips once, before the per-face mip resolves were seen, then
+    // the skip-memory path left them stale forever (blocky reflections).
+    bool complex_reader = !load_base || key.dimension != xenos::DataDimension::k2DOrStacked ||
+                          key.GetDepthOrArraySize() != 1;
+    if (from_resolve || complex_reader) {
       bool known = false;
       for (const Fh2ResolveReader& reader : fh2_resolve_readers_) {
         known |= reader.key == key && reader.start == address;
