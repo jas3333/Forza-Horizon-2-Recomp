@@ -1491,6 +1491,7 @@ void InstallFh2ClockWatchKey() {
 //   key <name>          press a bound key (8, 6, 7, 9, 0, F12, F3, ...)
 //   peek <hex> [n]      log n 32-bit words (hex and float) at a guest address
 //   poke <hex> <float>  write a float to a guest address
+//   watch <hex>         hardware write watchpoint on a guest address (logs writers)
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1540,6 +1541,15 @@ void CtlCommand(const std::string& line) {
     uint32_t addr = uint32_t(std::strtoul(a.c_str(), nullptr, 16)) & ~3u;
     TodWrite(mem, addr, f);
     REXLOG_INFO("[CTL] poke {:08X} = {}", addr, f);
+  } else if (cmd == "watch") {
+    std::string a;
+    in >> a;
+    uint32_t addr = uint32_t(std::strtoul(a.c_str(), nullptr, 16)) & ~3u;
+    if (!g_hw_fds.empty()) {
+      REXLOG_INFO("[CTL] watch: a watchpoint is still active");
+      return;
+    }
+    HwWatchArm(addr);
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);
