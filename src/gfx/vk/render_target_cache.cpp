@@ -7253,7 +7253,10 @@ void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
            op == xenos::StencilOp::kReplace;
   };
   bool stencil_reads = false;
-  if (normalized_depth_control.stencil_enable) {
+  if (normalized_depth_control.stencil_enable &&
+      !fh2::rtlog::TimedEnvInt("FH2_DEFER_STENCIL", 1)) {
+    stencil_reads = true;
+  } else if (normalized_depth_control.stencil_enable) {
     const RegisterFile& regs = register_file();
     auto ref_mask = regs.Get<reg::RB_STENCILREFMASK>();
     auto ref_mask_bf = regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
