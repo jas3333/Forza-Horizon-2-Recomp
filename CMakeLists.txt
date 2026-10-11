@@ -111,7 +111,7 @@ if(NOT WIN32)
         ${_rex_gfx}
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/thirdparty/renderdoc
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk)
-    target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable)
+    target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
     target_link_options(rexgpu-fh2 PRIVATE -Wl,--no-undefined)
     target_compile_definitions(rexgpu-fh2 PRIVATE REX_HAS_VULKAN=1)
     target_link_libraries(rexgpu-fh2 PRIVATE rexruntime xxHash::xxhash Vulkan::Headers
