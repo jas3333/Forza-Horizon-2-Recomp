@@ -496,7 +496,8 @@ extern "C" REX_FUNC(sub_8255D2C0) {
 // never registered ("Custom" preset) and A closed the menu without saving.
 // Runs for real by default now (2026-10-11).
 std::atomic<bool> g_stub_827DC190_on{false};
-std::atomic<bool> g_stub_827E1558_on{true};
+// Also options-menu logic (needed together with 827DC190 for the save).
+std::atomic<bool> g_stub_827E1558_on{false};
 extern "C" void __imp__sub_827DC190(PPCContext& ctx, uint8_t* base);
 extern "C" REX_FUNC(sub_827DC190) {
   if (!g_stub_827DC190_on.load(std::memory_order_relaxed)) {
