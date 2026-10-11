@@ -312,6 +312,8 @@ class ReXApp : public ui::WindowedApp, public ui::WindowListener, public ui::Win
   ui::DebugOverlayDialog::FrameStatsProvider frame_stats_provider_;
   std::filesystem::path config_path_;
   std::jthread checkpoint_probe_thread_;
+  // Guest output presenter, for F12 screenshots.
+  rex::ui::Presenter* screenshot_presenter_ = nullptr;
 };
 
 }  // namespace rex

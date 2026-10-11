@@ -1560,7 +1560,7 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
         }
         transfers = fh2_filtered_transfers_;
       }
-      if (fh2::rtlog::TimedEnvInt("FH2_NARROW_TRANSFERS", 1)) {
+      if (fh2::rtlog::TimedEnvInt("FH2_NARROW_TRANSFERS", 0)) {
         for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
           fh2_narrowed_transfers_[i] = transfers[i];
         }

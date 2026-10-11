@@ -374,6 +374,7 @@ bool ReXApp::SetupPresentation() {
   if (graphics_system && graphics_system->presenter()) {
     // SDK mode: the emulated-Xenos presenter drives the overlays.
     auto* presenter = graphics_system->presenter();
+    screenshot_presenter_ = presenter;
     auto* provider = graphics_system->provider();
     if (provider) {
       immediate_drawer_ = provider->CreateImmediateDrawer();
@@ -615,10 +616,10 @@ void ReXApp::OnKeyDown(ui::KeyEvent& e) {
   // F12: save the guest output (full internal resolution, before any window
   // scaling) as a PPM in ./screenshots next to the working directory.
   if (e.virtual_key() == ui::VirtualKey::kF12 && !e.prev_state()) {
-    auto* graphics_system = config_.graphics.get();
+    // The window's presenter (config_.graphics is handed to the runtime).
+    rex::ui::Presenter* presenter = screenshot_presenter_;
     rex::ui::RawImage image;
-    if (graphics_system && graphics_system->presenter() &&
-        graphics_system->presenter()->CaptureGuestOutput(image) && image.width && image.height) {
+    if (presenter && presenter->CaptureGuestOutput(image) && image.width && image.height) {
       std::filesystem::create_directories("screenshots");
       auto now = std::chrono::system_clock::now().time_since_epoch();
       std::string path = fmt::format(
@@ -640,7 +641,7 @@ void ReXApp::OnKeyDown(ui::KeyEvent& e) {
         REXLOG_INFO("Screenshot saved: {} ({}x{})", path, image.width, image.height);
       }
     } else {
-      REXLOG_WARN("Screenshot failed: no guest output to capture");
+      REXLOG_WARN("Screenshot failed: {}", presenter ? "no guest output to capture" : "no presenter");
     }
     e.set_handled(true);
     return;
