@@ -489,14 +489,30 @@ extern "C" REX_FUNC(sub_8255D2C0) {
 // query crashed on a null statement (found by tracing Xenia, 2026-10-11).
 
 // Festival Leaderboard / Cloud Session offline handler
+// Live switch (debug channel: stub <addr> on|off) for the original port's
+// stubs, to test whether they hide real game logic.
+std::atomic<bool> g_stub_827DC190_on{true};
+std::atomic<bool> g_stub_827E1558_on{true};
+extern "C" void __imp__sub_827DC190(PPCContext& ctx, uint8_t* base);
 extern "C" REX_FUNC(sub_827DC190) {
-  (void)base;
+  if (!g_stub_827DC190_on.load(std::memory_order_relaxed)) {
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1) < 5) REXLOG_INFO("[STUB] 827DC190 running the real function");
+    __imp__sub_827DC190(ctx, base);
+    return;
+  }
   ctx.r3.s64 = -1; // No active online session
 }
 
 // Multiplayer / Matchmaking Session Manager safe offline no-op
+extern "C" void __imp__sub_827E1558(PPCContext& ctx, uint8_t* base);
 extern "C" REX_FUNC(sub_827E1558) {
-  (void)base;
+  if (!g_stub_827E1558_on.load(std::memory_order_relaxed)) {
+    static std::atomic<int> n{0};
+    if (n.fetch_add(1) < 5) REXLOG_INFO("[STUB] 827E1558 running the real function r4={:08X}", ctx.r4.u32);
+    __imp__sub_827E1558(ctx, base);
+    return;
+  }
   ctx.r3.u64 = 0; // Success
 }
 
@@ -1532,6 +1548,7 @@ extern "C" REX_FUNC(sub_82686CC8) {
 //   tod [hours]         set the game clock (e.g. tod 19.9), or log it
 //   env <NAME> <v|off>  live renderer switch (FH2_* settings)
 //   capture [n]         renderer frame log of the next n frames
+//   stub <addr> on|off  toggle the original port's stubs (827DC190, 827E1558)
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1635,6 +1652,14 @@ void CtlCommand(const std::string& line) {
     }
     fn(n);
     REXLOG_INFO("[CTL] capture {} frame(s)", n);
+  } else if (cmd == "stub") {
+    std::string a, v;
+    in >> a >> v;
+    bool on = v != "off";
+    if (a == "827DC190") g_stub_827DC190_on = on;
+    else if (a == "827E1558") g_stub_827E1558_on = on;
+    else { REXLOG_INFO("[CTL] stub: unknown {}", a); return; }
+    REXLOG_INFO("[CTL] stub {} {}", a, on ? "on (stubbed)" : "off (real function)");
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);
