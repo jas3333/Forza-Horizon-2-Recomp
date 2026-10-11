@@ -52,6 +52,12 @@ class ImGuiDialog {
   virtual void OnClose() {}
   virtual void OnDraw(ImGuiIO& io) { (void)io; }
 
+ public:
+  // Whether the UI must keep repainting while this dialog exists (input,
+  // animation). Passive dialogs return false when they have nothing on
+  // screen, so an idle dialog doesn't make the UI thread present nonstop.
+  virtual bool WantsContinuousRepaint() const { return true; }
+
  private:
   ImGuiDrawer* imgui_drawer_ = nullptr;
   bool has_close_pending_ = false;

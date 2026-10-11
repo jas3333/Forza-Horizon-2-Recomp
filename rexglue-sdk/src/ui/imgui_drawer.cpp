@@ -439,7 +439,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
   if (!dialogs_.empty()) {
     // Repaint (and handle input) continuously if still active. In detached mode
     // there is no presenter; the app drives repaint via its own present loop.
-    if (presenter_) {
+    bool continuous = std::any_of(dialogs_.cbegin(), dialogs_.cend(), [](const ImGuiDialog* d) {
+      return d->WantsContinuousRepaint();
+    });
+    if (presenter_ && continuous) {
       presenter_->RequestUIPaintFromUIThread();
     }
   }

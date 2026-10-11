@@ -38,6 +38,9 @@ class AchievementToastDialog : public AchievementNotificationDialog {
  protected:
   void OnDraw(ImGuiIO& io) override;
 
+ public:
+  bool WantsContinuousRepaint() const override;
+
  private:
   static constexpr float kDisplaySeconds = 4.5f;
 
@@ -47,7 +50,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
     std::optional<std::chrono::steady_clock::time_point> visible_since;
   };
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::deque<PendingToast> queue_;
   AchievementIconCache icon_cache_;
 };

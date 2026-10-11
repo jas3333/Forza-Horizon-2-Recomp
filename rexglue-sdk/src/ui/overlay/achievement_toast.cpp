@@ -29,6 +29,11 @@ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
   queue_.push_back({event, std::chrono::steady_clock::now()});
 }
 
+bool AchievementToastDialog::WantsContinuousRepaint() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !queue_.empty();
+}
+
 void AchievementToastDialog::OnDraw(ImGuiIO& io) {
   auto now = std::chrono::steady_clock::now();
 
