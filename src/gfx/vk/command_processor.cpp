@@ -4210,6 +4210,31 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
       }
     }
     fh2::rtlog::Log("D {:016X} m{:X}", XXH3_64bits_digest(fp_state), uint32_t(bin_mask_));
+    if (fh2_log_next_draw_placement_) {
+      fh2_log_next_draw_placement_ = false;
+      auto window_offset = fp_regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      auto scissor_tl = fp_regs.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
+      auto scissor_br = fp_regs.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
+      auto screen_tl = fp_regs.Get<reg::PA_SC_SCREEN_SCISSOR_TL>();
+      auto screen_br = fp_regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
+      auto mode_cntl = fp_regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+      fh2::rtlog::Log(
+          "  STRIP placement: window offset ({},{}) vtx_window_offset_enable {} window scissor "
+          "({},{})-({},{}) disable_offset {} screen scissor ({},{})-({},{}) vp scale {},{} offset "
+          "{},{} surface pitch {} color base {} depth base {}",
+          int32_t(window_offset.window_x_offset), int32_t(window_offset.window_y_offset),
+          uint32_t(mode_cntl.vtx_window_offset_enable), uint32_t(scissor_tl.tl_x),
+          uint32_t(scissor_tl.tl_y), uint32_t(scissor_br.br_x), uint32_t(scissor_br.br_y),
+          uint32_t(scissor_tl.window_offset_disable), uint32_t(screen_tl.tl_x),
+          uint32_t(screen_tl.tl_y), uint32_t(screen_br.br_x), uint32_t(screen_br.br_y),
+          fp_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE),
+          fp_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+          fp_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+          fp_regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
+          uint32_t(fp_regs.Get<reg::RB_SURFACE_INFO>().surface_pitch),
+          uint32_t(fp_regs.Get<reg::RB_COLOR_INFO>().color_base),
+          uint32_t(fp_regs.Get<reg::RB_DEPTH_INFO>().depth_base));
+    }
     XXH3_freeState(fp_state);
   }
 
@@ -5050,6 +5075,7 @@ void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_
       break;
     case Pm4TraceEvent::kBinSelect:
       fh2::rtlog::Log("BIN_SELECT {:08X}{:08X}", b, a);
+      fh2_log_next_draw_placement_ = true;
       break;
     case Pm4TraceEvent::kPredicatedSkip:
       ++fh2::rtlog::g_counters.predicated_skips;

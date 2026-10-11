@@ -534,6 +534,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   VkQueryPool fh2_mark_pool_ = VK_NULL_HANDLE;
   std::vector<uint8_t> fh2_mark_categories_[kFh2TimestampSlots];
   fh2::rtlog::GpuCategory fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
+  bool fh2_log_next_draw_placement_ = false;
 
  public:
   // Starts attributing GPU time from this point of the command stream to the

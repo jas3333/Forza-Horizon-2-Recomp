@@ -7203,10 +7203,35 @@ void VulkanRenderTargetCache::Fh2Materialize(VulkanRenderTarget* render_target,
 void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
     RenderTarget* const* render_targets, std::vector<Transfer>* transfers,
     reg::RB_DEPTHCONTROL normalized_depth_control) {
+  // Stencil doesn't read the old values with function "always", only
+  // keep / zero / replace operations and a full write mask (both faces).
+  auto stencil_op_writes_constant = [](xenos::StencilOp op) {
+    return op == xenos::StencilOp::kKeep || op == xenos::StencilOp::kZero ||
+           op == xenos::StencilOp::kReplace;
+  };
+  bool stencil_reads = false;
+  if (normalized_depth_control.stencil_enable) {
+    const RegisterFile& regs = register_file();
+    auto ref_mask = regs.Get<reg::RB_STENCILREFMASK>();
+    auto ref_mask_bf = regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
+    const auto& dc = normalized_depth_control;
+    bool front_ok = dc.stencilfunc == xenos::CompareFunction::kAlways &&
+                    stencil_op_writes_constant(dc.stencilzpass) &&
+                    (dc.stencilzpass == xenos::StencilOp::kKeep ||
+                     ref_mask.stencilwritemask == 0xFF);
+    bool back_ok = !dc.backface_enable ||
+                   (dc.stencilfunc_bf == xenos::CompareFunction::kAlways &&
+                    stencil_op_writes_constant(dc.stencilzpass_bf) &&
+                    (dc.stencilzpass_bf == xenos::StencilOp::kKeep ||
+                     ref_mask_bf.stencilwritemask == 0xFF));
+    // With depth "always" the fail / zfail ops never apply.
+    bool depth_always = !dc.z_enable || dc.zfunc == xenos::CompareFunction::kAlways;
+    stencil_reads = !(front_ok && back_ok && depth_always);
+  }
   bool draw_reads_depth =
       (normalized_depth_control.z_enable &&
        normalized_depth_control.zfunc != xenos::CompareFunction::kAlways) ||
-      normalized_depth_control.stencil_enable;
+      stencil_reads;
   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
     auto* dest = static_cast<VulkanRenderTarget*>(render_targets[i]);
     if (!dest) {
