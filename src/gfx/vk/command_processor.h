@@ -275,6 +275,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueCopy() override;
   void OnOrderedPacketBegin(uint32_t opcode) override;
   void OnOrderedPacketEnd() override;
+  void WriteFenceMemory32(uint32_t address, uint32_t guest_value) override;
 
  private:
   // FH2 renderer split. The command thread (parser) reads the PM4 stream and
@@ -293,6 +294,7 @@ class VulkanCommandProcessor : public CommandProcessor {
     kShader,
     kTrace,
     kPrimaryBufferEnd,
+    kFenceWrite,
   };
   struct Fh2OpHeader {
     Fh2OpType type;

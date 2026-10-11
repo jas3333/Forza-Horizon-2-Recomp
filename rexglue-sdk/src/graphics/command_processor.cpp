@@ -1036,7 +1036,7 @@ bool CommandProcessor::IsOrderedPacketOpcode(uint32_t opcode) {
     // Not EVENT_WRITE (a register write), EVENT_WRITE_EXT (constant extents
     // to memory), INVALIDATE_STATE (nothing) -- hundreds per frame in FH2.
     // WAIT_REG_MEM enters ordered mode itself, only if it has to wait.
-    case PM4_EVENT_WRITE_SHD:
+    // EVENT_WRITE_SHD (fences) writes through WriteFenceMemory32 instead.
     case PM4_EVENT_WRITE_ZPD:
     case PM4_VIZ_QUERY:
       return true;
@@ -1429,7 +1429,7 @@ bool CommandProcessor::ExecutePacketType3_EVENT_WRITE_SHD(memory::RingBuffer* re
   auto endianness = static_cast<xenos::Endian>(address & 0x3);
   address &= ~0x3;
   data_value = GpuSwap(data_value, endianness);
-  memory::store(memory_->TranslatePhysical(address), data_value);
+  WriteFenceMemory32(address, data_value);
   return true;
 }
 

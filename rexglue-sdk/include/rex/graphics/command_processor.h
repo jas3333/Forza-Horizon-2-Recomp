@@ -187,6 +187,11 @@ class CommandProcessor {
   virtual void OnOrderedPacketBegin(uint32_t opcode) {}
   virtual void OnOrderedPacketEnd() {}
   static bool IsOrderedPacketOpcode(uint32_t opcode);
+  // A fence-like 32-bit memory write (already in guest byte order) that must
+  // become visible only after all earlier draws were processed.
+  virtual void WriteFenceMemory32(uint32_t address, uint32_t guest_value) {
+    memory::store(memory_->TranslatePhysical(address), guest_value);
+  }
   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
   bool ExecutePacket(memory::RingBuffer* reader);
   bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);

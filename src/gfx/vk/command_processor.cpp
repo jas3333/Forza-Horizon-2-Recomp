@@ -7637,6 +7637,9 @@ void VulkanCommandProcessor::Fh2ExecuteOp(const Fh2OpHeader* op) {
     case Fh2OpType::kPrimaryBufferEnd:
       OnPrimaryBufferEndImpl();
       break;
+    case Fh2OpType::kFenceWrite:
+      memory::store(memory_->TranslatePhysical(words[0]), words[1]);
+      break;
     case Fh2OpType::kWrap:
       break;
   }
@@ -7685,6 +7688,22 @@ void VulkanCommandProcessor::OnOrderedPacketEnd() {
 }
 
 void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  if (unsigned(index - XE_GPU_REG_SCRATCH_REG0) < 8u) {
+    // Scratch registers: D3D fences when written back to memory -- the
+    // write goes through the queue behind the earlier draws.
+    const_cast<volatile uint32_t&>(register_file_->values[index]) = value;
+    uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
+    if ((1u << scratch_reg) & register_file_->values[XE_GPU_REG_SCRATCH_UMSK]) {
+      WriteFenceMemory32(register_file_->values[XE_GPU_REG_SCRATCH_ADDR] + scratch_reg * 4,
+                         rex::byte_swap(value));
+    }
+    return;
+  }
+  if (index == XE_GPU_REG_COHER_STATUS_HOST) {
+    // Only marks the status for a later WAIT_REG_MEM (parser side).
+    CommandProcessor::WriteRegister(index, value);
+    return;
+  }
   if (Fh2IsSideEffectRegister(index)) {
     bool was_ordered = fh2_in_ordered_;
     if (!was_ordered) {
@@ -7807,6 +7826,20 @@ void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_
   words[1] = a;
   words[2] = b;
   Fh2Publish(24);
+}
+
+void VulkanCommandProcessor::WriteFenceMemory32(uint32_t address, uint32_t guest_value) {
+  if (Fh2Inline()) {
+    memory::store(memory_->TranslatePhysical(address), guest_value);
+    return;
+  }
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(16));
+  op->type = Fh2OpType::kFenceWrite;
+  op->size = 16;
+  auto* words = reinterpret_cast<uint32_t*>(op + 1);
+  words[0] = address;
+  words[1] = guest_value;
+  Fh2Publish(16);
 }
 
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
