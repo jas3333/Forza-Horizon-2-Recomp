@@ -158,3 +158,36 @@ if(REXGLUE_USE_D3D12)
         dxguid
     )
 endif()
+
+# rex-shadertool: offline Xenos microcode -> SPIR-V (native renderer shader
+# packs). Compiles the translator sources directly rather than linking the
+# plugin, whose symbols are hidden.
+if(REXGLUE_USE_VULKAN)
+    add_executable(rex-shadertool
+        tools/shadertool.cpp
+        util/draw.cpp
+        util/draw_extent_estimator.cpp
+        pipeline/shader/interpreter.cpp
+        flags.cpp
+        registers.cpp
+        register_file.cpp
+        pipeline/shader/shader.cpp
+        format/ucode.cpp
+        pipeline/shader/translator.cpp
+        pipeline/shader/translator_disasm.cpp
+        ${REXGPU_XENOS_SPIRV_SOURCES}
+    )
+    target_include_directories(rex-shadertool PRIVATE ${REXGLUE_ROOT}/thirdparty/renderdoc ${REXGLUE_ROOT})
+    target_compile_options(rex-shadertool PRIVATE -Wno-unused-variable)
+    target_link_libraries(rex-shadertool PRIVATE
+        rexruntime
+        xxHash::xxhash
+        Vulkan::Headers
+        glslang::SPIRV
+        glslang
+        MachineIndependent
+        GenericCodeGen
+        OSDependent
+        OGLCompiler
+    )
+endif()
