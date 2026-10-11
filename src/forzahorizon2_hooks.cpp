@@ -1498,6 +1498,34 @@ void InstallFh2ClockWatchKey() {
 }
 
 // ---------------------------------------------------------------------------
+// Time-of-day override. sub_82F51E48 is the game-side proxy of the render
+// environment setter (sub_82EDAD38): it packs its arguments into a deferred
+// call. The time of day (fraction of a day) is the float argument at the
+// caller's [r1+140] on entry. 'tod <fraction>' on the debug channel forces it,
+// 'tod off' restores the game's value. The first call logs the caller (the
+// code computing the environment).
+std::atomic<float> g_tod_override{-1.0f};
+extern "C" void __imp__sub_82F51E48(PPCContext& ctx, uint8_t* base);
+extern "C" REX_FUNC(sub_82F51E48) {
+  static std::atomic<int> logged{0};
+  uint32_t slot = ctx.r1.u32 + 140;
+  uint32_t raw = __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + slot));
+  float game_tod;
+  std::memcpy(&game_tod, &raw, 4);
+  if (logged.fetch_add(1) == 0) {
+    REXLOG_INFO("[TOD] environment proxy called from lr={:08X}, time of day {:.4f}",
+                uint32_t(ctx.lr), game_tod);
+  }
+  float o = g_tod_override.load(std::memory_order_relaxed);
+  if (o >= 0.0f) {
+    uint32_t v;
+    std::memcpy(&v, &o, 4);
+    *reinterpret_cast<uint32_t*>(base + slot) = __builtin_bswap32(v);
+  }
+  __imp__sub_82F51E48(ctx, base);
+}
+
+// ---------------------------------------------------------------------------
 // Debug command channel: a named pipe "fh2ctl" in the working directory.
 // One command per line (e.g. `echo "key 8" > play/fh2ctl`); results go to the
 // log as [CTL] lines.
@@ -1505,6 +1533,7 @@ void InstallFh2ClockWatchKey() {
 //   peek <hex> [n]      log n 32-bit words (hex and float) at a guest address
 //   poke <hex> <float>  write a float to a guest address
 //   watch <hex>         hardware write watchpoint on a guest address (logs writers)
+//   tod <frac|hours|off> force the render time of day (e.g. tod 23.5)
 //   say <text>          log a marker
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1563,6 +1592,19 @@ void CtlCommand(const std::string& line) {
       return;
     }
     HwWatchArm(addr);
+  } else if (cmd == "tod") {
+    std::string v;
+    in >> v;
+    if (v == "off") {
+      g_tod_override = -1.0f;
+      REXLOG_INFO("[CTL] tod: game clock");
+    } else {
+      float f = std::strtof(v.c_str(), nullptr);
+      if (f > 1.0f) f /= 24.0f;  // allow hours (e.g. 23.5)
+      g_tod_override = std::fmod(std::max(f, 0.0f), 1.0f);
+      REXLOG_INFO("[CTL] tod: forced {:.4f} ({:.2f} h)", g_tod_override.load(),
+                  g_tod_override.load() * 24.0f);
+    }
   } else if (cmd == "say") {
     std::string rest;
     std::getline(in, rest);
