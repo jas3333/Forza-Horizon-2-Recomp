@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -3046,6 +3047,22 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
   EndSubmission(true);
 }
 
+namespace {
+// Frame log: where a barrier that breaks the current render pass comes from
+// (return address as an offset into this library, for addr2line / nm).
+void Fh2LogBarrierCaller(const char* kind, void* return_address, bool in_render_pass) {
+  if (!fh2::rtlog::g_active || !in_render_pass) {
+    return;
+  }
+  Dl_info info;
+  uintptr_t offset = uintptr_t(return_address);
+  if (dladdr(return_address, &info) && info.dli_fbase) {
+    offset -= uintptr_t(info.dli_fbase);
+  }
+  fh2::rtlog::Log("    BARRIER {} in render pass from +{:X}", kind, offset);
+}
+}  // namespace
+
 bool VulkanCommandProcessor::PushBufferMemoryBarrier(
     VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size, VkPipelineStageFlags src_stage_mask,
     VkPipelineStageFlags dst_stage_mask, VkAccessFlags src_access_mask,
@@ -3055,6 +3072,7 @@ bool VulkanCommandProcessor::PushBufferMemoryBarrier(
       src_queue_family_index == dst_queue_family_index) {
     return false;
   }
+  Fh2LogBarrierCaller("buffer", __builtin_return_address(0), in_render_pass_);
 
   // Separate different barriers for overlapping buffer ranges into different
   // pipeline barrier commands.
@@ -3106,6 +3124,7 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
       old_layout == new_layout && src_queue_family_index == dst_queue_family_index) {
     return false;
   }
+  Fh2LogBarrierCaller("image", __builtin_return_address(0), in_render_pass_);
 
   // Separate different barriers for overlapping image subresource ranges into
   // different pipeline barrier commands.
