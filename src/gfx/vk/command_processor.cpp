@@ -703,7 +703,7 @@ bool VulkanCommandProcessor::ExecutePacketType3_EVENT_WRITE_ZPD(memory::RingBuff
   uint32_t initiator = reader->ReadAndSwap<uint32_t>();
   WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, initiator & 0x3F);
 
-  uint32_t sample_count_addr = register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
+  uint32_t sample_count_addr = dregs().values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR];
   auto* sample_counts =
       memory_->TranslatePhysical<xenos::xe_gpu_depth_sample_counts*>(sample_count_addr);
   if (!sample_counts) {
@@ -821,6 +821,9 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
   InvalidateAllVertexBufferResidency();
+  // Draw-side register file (renderer split), starting as a copy.
+  fh2_draw_regs_ = std::make_unique<RegisterFile>();
+  std::memcpy(fh2_draw_regs_->values, register_file_->values, sizeof(fh2_draw_regs_->values));
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -969,7 +972,7 @@ bool VulkanCommandProcessor::SetupContext() {
   }
 
   primitive_processor_ =
-      std::make_unique<VulkanPrimitiveProcessor>(*register_file_, *memory_, *shared_memory_, *this);
+      std::make_unique<VulkanPrimitiveProcessor>(dregs(), *memory_, *shared_memory_, *this);
   if (!primitive_processor_->Initialize()) {
     REXGPU_ERROR("Failed to initialize the geometric primitive processor");
     return false;
@@ -1033,7 +1036,7 @@ bool VulkanCommandProcessor::SetupContext() {
 
   // Requires the transient descriptor set layouts.
   render_target_cache_ = std::make_unique<VulkanRenderTargetCache>(
-      *register_file_, *memory_, draw_resolution_scale_x, draw_resolution_scale_y, *this);
+      dregs(), *memory_, draw_resolution_scale_x, draw_resolution_scale_y, *this);
   if (!render_target_cache_->Initialize(shared_memory_binding_count)) {
     REXGPU_ERROR("Failed to initialize the render target cache");
     return false;
@@ -1080,7 +1083,7 @@ bool VulkanCommandProcessor::SetupContext() {
   }
 
   pipeline_cache_ = std::make_unique<VulkanPipelineCache>(
-      *this, *register_file_, *render_target_cache_, guest_shader_vertex_stages_);
+      *this, dregs(), *render_target_cache_, guest_shader_vertex_stages_);
   if (!pipeline_cache_->Initialize()) {
     REXGPU_ERROR("Failed to initialize the graphics pipeline cache");
     return false;
@@ -1088,7 +1091,7 @@ bool VulkanCommandProcessor::SetupContext() {
 
   // Requires the transient descriptor set layouts.
   texture_cache_ =
-      VulkanTextureCache::Create(*register_file_, *shared_memory_, draw_resolution_scale_x,
+      VulkanTextureCache::Create(dregs(), *shared_memory_, draw_resolution_scale_x,
                                  draw_resolution_scale_y, *this, guest_shader_pipeline_stages_);
   if (!texture_cache_) {
     REXGPU_ERROR("Failed to initialize the texture cache");
@@ -1968,6 +1971,7 @@ bool VulkanCommandProcessor::SetupContext() {
 }
 
 void VulkanCommandProcessor::ShutdownContext() {
+  Fh2StopDrawThread();
   AwaitAllQueueOperationsCompletion();
   Fh2StopSubmitThread();
   InvalidateAllVertexBufferResidency();
@@ -2204,8 +2208,10 @@ void VulkanCommandProcessor::ShutdownContext() {
   CommandProcessor::ShutdownContext();
 }
 
-void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
-  CommandProcessor::WriteRegister(index, value);
+void VulkanCommandProcessor::DrawWriteRegister(uint32_t index, uint32_t value) {
+  // Side-effecting registers (scratch, COHER, gamma) never get here: the
+  // parser handles them with the draw thread drained.
+  dregs().values[index] = value;
 
   if (index >= XE_GPU_REG_SHADER_CONSTANT_000_X && index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
     if (frame_open_) {
@@ -2241,7 +2247,7 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
   }
 }
 
-void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+void VulkanCommandProcessor::DrawWriteRegistersFromMem(uint32_t start_index, uint32_t* base,
                                                    uint32_t num_registers) {
   if (!num_registers) {
     return;
@@ -2276,7 +2282,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
 
   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_000_X &&
       end_index <= XE_GPU_REG_SHADER_CONSTANT_511_W) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    memory::copy_and_swap(dregs().values + start_index, base, num_registers);
     if (frame_open_) {
       uint32_t first_float_constant = (start_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
       uint32_t last_float_constant = (end_index - XE_GPU_REG_SHADER_CONSTANT_000_X) >> 2;
@@ -2304,7 +2310,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
 
   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031 &&
       end_index <= XE_GPU_REG_SHADER_CONSTANT_LOOP_31) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    memory::copy_and_swap(dregs().values + start_index, base, num_registers);
     current_constant_buffers_up_to_date_ &=
         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferBoolLoop);
     return;
@@ -2312,7 +2318,7 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
 
   if (start_index >= XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 &&
       end_index <= XE_GPU_REG_SHADER_CONSTANT_FETCH_31_5) {
-    memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+    memory::copy_and_swap(dregs().values + start_index, base, num_registers);
     current_constant_buffers_up_to_date_ &=
         ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFetch);
     uint32_t first_fetch_dword = start_index - XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0;
@@ -2346,12 +2352,12 @@ void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_
     }
     if (block) {
       uint32_t last = std::min(end_index, block->second);
-      WriteRegistersFromMem(index, base + (index - start_index), last - index + 1);
+      DrawWriteRegistersFromMem(index, base + (index - start_index), last - index + 1);
       index = last + 1;
     } else {
       uint32_t last = std::min(end_index, next_block_start - 1);
       for (; index <= last; ++index) {
-        CommandProcessor::WriteRegister(
+        DrawWriteRegister(
             index, memory::load_and_swap<uint32_t>(base + (index - start_index)));
       }
     }
@@ -3713,27 +3719,33 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
   }
 }
 
-void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+void VulkanCommandProcessor::OnPrimaryBufferEndImpl() {
   if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
       CanEndSubmissionImmediately()) {
     EndSubmission(false);
   }
 }
 
-Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
-                                           const uint32_t* host_address, uint32_t dword_count) {
-  return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+void VulkanCommandProcessor::Fh2LoadShaderImpl(xenos::ShaderType shader_type,
+                                               const uint32_t* host_address,
+                                               uint32_t dword_count) {
+  Shader* shader = pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+  if (shader_type == xenos::ShaderType::kVertex) {
+    fh2_draw_vertex_shader_ = shader;
+  } else {
+    fh2_draw_pixel_shader_ = shader;
+  }
 }
 
-bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
-                                       IndexBufferInfo* index_buffer_info,
-                                       bool major_mode_explicit) {
+bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                           IndexBufferInfo* index_buffer_info,
+                                           bool major_mode_explicit) {
   SCOPE_profile_zone("gpu:IssueDraw");
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
-  const RegisterFile& regs = *register_file_;
+  const RegisterFile& regs = dregs();
   (void)index_buffer_info;
   auto draw_fail = [&](const char* stage) {
     auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
@@ -3762,7 +3774,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   memexport_ranges_.clear();
 
   // Vertex shader analysis.
-  auto vertex_shader = static_cast<VulkanShader*>(active_vertex_shader());
+  auto vertex_shader = static_cast<VulkanShader*>(fh2_draw_vertex_shader_);
   if (!vertex_shader) {
     // Always need a vertex shader.
     return draw_fail("missing_vertex_shader");
@@ -3792,7 +3804,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     // See xenos::EdramMode for explanation why the pixel shader is only used
     // when it's kColorDepth here.
     if (edram_mode == xenos::EdramMode::kColorDepth) {
-      pixel_shader = static_cast<VulkanShader*>(active_pixel_shader());
+      pixel_shader = static_cast<VulkanShader*>(fh2_draw_pixel_shader_);
       if (pixel_shader) {
         pipeline_cache_->AnalyzeShaderUcode(*pixel_shader);
         if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
@@ -4057,7 +4069,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   }
 
   // FH2 full-frame strips.
-  Fh2FullFrameRegisterOverride fh2_full_frame_override(*register_file_);
+  Fh2FullFrameRegisterOverride fh2_full_frame_override(dregs());
   if (fh2_bin_strip_ && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2)) {
     auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
     uint32_t strip_y = uint32_t(std::max(-int32_t(window_offset.window_y_offset), 0));
@@ -4410,7 +4422,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // used constants, textures) to measure duplicates across predicated-tiling
   // strips.
   if (fh2::rtlog::g_active) {
-    const RegisterFile& fp_regs = *register_file_;
+    const RegisterFile& fp_regs = dregs();
     XXH3_state_t* fp_state = XXH3_createState();
     XXH3_64bits_reset(fp_state);
     uint64_t shader_hashes[2] = {vertex_shader->ucode_data_hash(),
@@ -4781,7 +4793,7 @@ bool VulkanCommandProcessor::IssueCopy() {
   }
 
   if (render_target_cache_->Fh2FullFrameActive()) {
-    auto window_offset = register_file_->Get<reg::PA_SC_WINDOW_OFFSET>();
+    auto window_offset = dregs().Get<reg::PA_SC_WINDOW_OFFSET>();
     render_target_cache_->Fh2FullFrameCopyStripToHost(
         uint32_t(std::max(-int32_t(window_offset.window_y_offset), 0)));
   }
@@ -4883,7 +4895,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
       return true;
     }
 
-    reg::RB_COPY_DEST_INFO copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
+    reg::RB_COPY_DEST_INFO copy_dest_info = dregs().Get<reg::RB_COPY_DEST_INFO>();
     const FormatInfo* format_info = FormatInfo::Get(uint32_t(copy_dest_info.copy_dest_format));
     uint32_t bits_per_pixel = format_info->bits_per_pixel;
     if (bits_per_pixel != 8 && bits_per_pixel != 16 && bits_per_pixel != 32 &&
@@ -5347,7 +5359,7 @@ uint64_t VulkanCommandProcessor::Fh2DrawFingerprint(const Shader& vertex_shader,
                                                    const IndexBufferInfo* index_buffer_info) const {
   // Gathered into one buffer and hashed once (many small streaming updates
   // were ~7% of the command thread in busy scenes).
-  const RegisterFile& regs = *register_file_;
+  const RegisterFile& regs = dregs();
   thread_local std::vector<uint32_t> data;
   data.clear();
   auto append = [](const uint32_t* words, size_t count) {
@@ -5390,7 +5402,7 @@ uint64_t VulkanCommandProcessor::Fh2DrawFingerprint(const Shader& vertex_shader,
 }
 
 bool VulkanCommandProcessor::Fh2DrawBlends() const {
-  auto blend = register_file_->Get<reg::RB_BLENDCONTROL>();
+  auto blend = dregs().Get<reg::RB_BLENDCONTROL>();
   return !(blend.color_srcblend == xenos::BlendFactor::kOne &&
            blend.color_destblend == xenos::BlendFactor::kZero &&
            blend.color_comb_fcn == xenos::BlendOp::kAdd &&
@@ -5399,7 +5411,7 @@ bool VulkanCommandProcessor::Fh2DrawBlends() const {
            blend.alpha_comb_fcn == xenos::BlendOp::kAdd);
 }
 
-void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
+void VulkanCommandProcessor::OnPm4TraceImpl(Pm4TraceEvent event, uint32_t a, uint32_t b) {
   switch (event) {
     case Pm4TraceEvent::kIndirectBuffer:
       fh2::rtlog::Log("IB {:08X} len {:X}", a, b);
@@ -6309,7 +6321,7 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
-  const RegisterFile& regs = *register_file_;
+  const RegisterFile& regs = dregs();
   uint32_t draw_resolution_scale_x = texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
   uint32_t draw_resolution_scale_y = texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1;
 
@@ -6520,7 +6532,7 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
-  const RegisterFile& regs = *register_file_;
+  const RegisterFile& regs = dregs();
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
   auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
@@ -7017,7 +7029,7 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 
-  const RegisterFile& regs = *register_file_;
+  const RegisterFile& regs = dregs();
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -7474,6 +7486,341 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
   }
   assert_not_zero(descriptor_set_write_count);
   return descriptor_set_write_count;
+}
+
+
+// ---------------------------------------------------------------------------
+// FH2 renderer split (see command_processor.h)
+
+namespace {
+__attribute__((tls_model("initial-exec"))) thread_local bool g_fh2_draw_side = false;
+// Marks the current thread as running draw-side code for its lifetime.
+struct Fh2DrawSideScope {
+  bool previous;
+  Fh2DrawSideScope() : previous(g_fh2_draw_side) { g_fh2_draw_side = true; }
+  ~Fh2DrawSideScope() { g_fh2_draw_side = previous; }
+};
+constexpr uint64_t kFh2QueueSize = uint64_t(32) << 20;
+inline uint32_t Fh2AlignOp(uint32_t size) { return (size + 7) & ~uint32_t(7); }
+inline void Fh2CpuRelax(uint32_t& spins) {
+  if (++spins < 4096) {
+    __builtin_ia32_pause();
+  } else {
+    std::this_thread::yield();
+  }
+}
+// Registers whose writes have effects beyond the register file.
+inline bool Fh2IsSideEffectRegister(uint32_t index) {
+  return index >= RegisterFile::kRegisterCount ||
+         unsigned(index - XE_GPU_REG_SCRATCH_REG0) < 8u || index == XE_GPU_REG_COHER_STATUS_HOST ||
+         index == XE_GPU_REG_DC_LUT_RW_INDEX || index == XE_GPU_REG_DC_LUT_SEQ_COLOR ||
+         index == XE_GPU_REG_DC_LUT_PWL_DATA || index == XE_GPU_REG_DC_LUT_30_COLOR;
+}
+}  // namespace
+
+bool VulkanCommandProcessor::Fh2OnDrawSide() const { return g_fh2_draw_side; }
+
+uint8_t* VulkanCommandProcessor::Fh2Reserve(uint32_t size) {
+  const uint64_t capacity = fh2_queue_.size();
+  uint64_t head = fh2_queue_head_.load(std::memory_order_relaxed);
+  uint64_t position = head % capacity;
+  uint32_t spins = 0;
+  if (position + size > capacity) {
+    // Fill the rest of the buffer with a wrap marker.
+    uint32_t fill = uint32_t(capacity - position);
+    while (head + fill - fh2_queue_tail_.load(std::memory_order_acquire) > capacity) {
+      Fh2CpuRelax(spins);
+    }
+    auto* wrap = reinterpret_cast<Fh2OpHeader*>(&fh2_queue_[position]);
+    wrap->type = Fh2OpType::kWrap;
+    wrap->size = fill;
+    Fh2Publish(fill);
+    head += fill;
+    position = 0;
+  }
+  while (head + size - fh2_queue_tail_.load(std::memory_order_acquire) > capacity) {
+    Fh2CpuRelax(spins);
+  }
+  return &fh2_queue_[position];
+}
+
+void VulkanCommandProcessor::Fh2Publish(uint32_t size) {
+  fh2_queue_head_.fetch_add(size, std::memory_order_seq_cst);
+  if (fh2_draw_sleeping_.load(std::memory_order_seq_cst)) {
+    fh2_queue_head_.notify_one();
+  }
+}
+
+void VulkanCommandProcessor::Fh2Drain() {
+  if (!fh2_draw_thread_.joinable()) {
+    return;
+  }
+  uint64_t head = fh2_queue_head_.load(std::memory_order_relaxed);
+  uint32_t spins = 0;
+  while (fh2_queue_tail_.load(std::memory_order_acquire) != head) {
+    Fh2CpuRelax(spins);
+  }
+}
+
+void VulkanCommandProcessor::Fh2DrawThreadMain() {
+  pthread_setname_np(pthread_self(), "FH2 GPU draw");
+  Fh2DrawSideScope draw_side;
+  const uint64_t capacity = fh2_queue_.size();
+  uint64_t tail = fh2_queue_tail_.load(std::memory_order_relaxed);
+  while (true) {
+    uint64_t head = fh2_queue_head_.load(std::memory_order_acquire);
+    if (tail == head) {
+      if (fh2_draw_stop_.load(std::memory_order_acquire)) {
+        break;
+      }
+      // Spin a little (the parser usually has more soon), then sleep.
+      uint32_t spins = 0;
+      while (spins < 20000 && (head = fh2_queue_head_.load(std::memory_order_acquire)) == tail &&
+             !fh2_draw_stop_.load(std::memory_order_relaxed)) {
+        ++spins;
+        __builtin_ia32_pause();
+      }
+      if (head == tail) {
+        fh2_draw_sleeping_.store(1, std::memory_order_seq_cst);
+        head = fh2_queue_head_.load(std::memory_order_seq_cst);
+        if (head == tail && !fh2_draw_stop_.load(std::memory_order_seq_cst)) {
+          fh2_queue_head_.wait(head, std::memory_order_seq_cst);
+        }
+        fh2_draw_sleeping_.store(0, std::memory_order_relaxed);
+        continue;
+      }
+    }
+    while (tail != head) {
+      const auto* op = reinterpret_cast<const Fh2OpHeader*>(&fh2_queue_[tail % capacity]);
+      uint32_t size = op->size;
+      if (op->type != Fh2OpType::kWrap) {
+        Fh2ExecuteOp(op);
+      }
+      tail += size;
+      fh2_queue_tail_.store(tail, std::memory_order_release);
+    }
+  }
+}
+
+void VulkanCommandProcessor::Fh2StopDrawThread() {
+  if (!fh2_draw_thread_.joinable()) {
+    return;
+  }
+  Fh2Drain();
+  fh2_draw_stop_.store(true, std::memory_order_seq_cst);
+  fh2_queue_head_.notify_one();
+  fh2_draw_thread_.join();
+  fh2_split_threaded_ = false;
+}
+
+void VulkanCommandProcessor::Fh2ExecuteOp(const Fh2OpHeader* op) {
+  const auto* words = reinterpret_cast<const uint32_t*>(op + 1);
+  switch (op->type) {
+    case Fh2OpType::kRegister:
+      DrawWriteRegister(words[0], words[1]);
+      break;
+    case Fh2OpType::kRegisterRange:
+      DrawWriteRegistersFromMem(words[0], const_cast<uint32_t*>(words + 2), words[1]);
+      break;
+    case Fh2OpType::kDraw: {
+      auto draw = *reinterpret_cast<const Fh2DrawOp*>(op);
+      if (!IssueDrawImpl(draw.prim_type, draw.index_count,
+                         draw.has_index_buffer ? &draw.index_buffer_info : nullptr,
+                         draw.major_mode_explicit != 0)) {
+        REXGPU_ERROR("Draw thread: IssueDraw failed");
+      }
+    } break;
+    case Fh2OpType::kShader:
+      Fh2LoadShaderImpl(xenos::ShaderType(words[0]), words + 2, words[1]);
+      break;
+    case Fh2OpType::kTrace:
+      OnPm4TraceImpl(Pm4TraceEvent(words[0]), words[1], words[2]);
+      break;
+    case Fh2OpType::kPrimaryBufferEnd:
+      OnPrimaryBufferEndImpl();
+      break;
+    case Fh2OpType::kWrap:
+      break;
+  }
+}
+
+void VulkanCommandProcessor::Fh2SyncDrawRegisters() {
+  // Ordered packets may write the parser's register file directly (query
+  // status bits); bring the draw-side file up to date.
+  Fh2DrawSideScope draw_side;
+  const uint32_t* parser_values = register_file_->values;
+  uint32_t* draw_values = dregs().values;
+  for (uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
+    uint32_t value = parser_values[i];
+    if (draw_values[i] != value) {
+      DrawWriteRegister(i, value);
+    }
+  }
+}
+
+void VulkanCommandProcessor::OnOrderedPacketBegin() {
+  Fh2Drain();
+  bool want_thread = fh2::rtlog::TimedEnvInt("FH2_SPLIT", 1) != 0;
+  if (want_thread && !fh2_draw_thread_.joinable()) {
+    if (fh2_queue_.empty()) {
+      fh2_queue_.resize(kFh2QueueSize);
+    }
+    fh2_draw_stop_.store(false);
+    fh2_draw_thread_ = std::thread([this]() { Fh2DrawThreadMain(); });
+    REXGPU_INFO("FH2 renderer split: draw thread started");
+  }
+  fh2_split_threaded_ = want_thread && fh2_draw_thread_.joinable();
+  fh2_in_ordered_ = true;
+}
+
+void VulkanCommandProcessor::OnOrderedPacketEnd() {
+  Fh2SyncDrawRegisters();
+  fh2_in_ordered_ = false;
+}
+
+void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+  if (g_fh2_draw_side) {
+    DrawWriteRegister(index, value);
+    return;
+  }
+  if (Fh2IsSideEffectRegister(index)) {
+    bool was_ordered = fh2_in_ordered_;
+    if (!was_ordered) {
+      Fh2Drain();
+      fh2_in_ordered_ = true;
+    }
+    CommandProcessor::WriteRegister(index, value);
+    if (index < RegisterFile::kRegisterCount) {
+      Fh2DrawSideScope draw_side;
+      DrawWriteRegister(index, register_file_->values[index]);
+    }
+    fh2_in_ordered_ = was_ordered;
+    return;
+  }
+  const_cast<volatile uint32_t&>(register_file_->values[index]) = value;
+  if (Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    DrawWriteRegister(index, value);
+    return;
+  }
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(16));
+  op->type = Fh2OpType::kRegister;
+  op->size = 16;
+  auto* words = reinterpret_cast<uint32_t*>(op + 1);
+  words[0] = index;
+  words[1] = value;
+  Fh2Publish(16);
+}
+
+void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index, uint32_t* base,
+                                                   uint32_t num_registers) {
+  if (g_fh2_draw_side) {
+    DrawWriteRegistersFromMem(start_index, base, num_registers);
+    return;
+  }
+  if (!num_registers) {
+    return;
+  }
+  uint32_t end_index = start_index + num_registers - 1;
+  auto overlaps = [&](uint32_t first, uint32_t last) {
+    return start_index <= last && end_index >= first;
+  };
+  if (end_index >= RegisterFile::kRegisterCount ||
+      overlaps(XE_GPU_REG_SCRATCH_REG0, XE_GPU_REG_SCRATCH_REG0 + 7) ||
+      overlaps(XE_GPU_REG_COHER_STATUS_HOST, XE_GPU_REG_COHER_STATUS_HOST) ||
+      overlaps(XE_GPU_REG_DC_LUT_RW_INDEX, XE_GPU_REG_DC_LUT_RW_INDEX) ||
+      overlaps(XE_GPU_REG_DC_LUT_SEQ_COLOR, XE_GPU_REG_DC_LUT_SEQ_COLOR) ||
+      overlaps(XE_GPU_REG_DC_LUT_PWL_DATA, XE_GPU_REG_DC_LUT_PWL_DATA) ||
+      overlaps(XE_GPU_REG_DC_LUT_30_COLOR, XE_GPU_REG_DC_LUT_30_COLOR)) {
+    for (uint32_t i = 0; i < num_registers; ++i) {
+      WriteRegister(start_index + i, memory::load_and_swap<uint32_t>(base + i));
+    }
+    return;
+  }
+  memory::copy_and_swap(register_file_->values + start_index, base, num_registers);
+  if (Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    DrawWriteRegistersFromMem(start_index, base, num_registers);
+    return;
+  }
+  uint32_t size = Fh2AlignOp(uint32_t(sizeof(Fh2OpHeader)) + 8 + num_registers * 4);
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(size));
+  op->type = Fh2OpType::kRegisterRange;
+  op->size = size;
+  auto* words = reinterpret_cast<uint32_t*>(op + 1);
+  words[0] = start_index;
+  words[1] = num_registers;
+  std::memcpy(words + 2, base, num_registers * sizeof(uint32_t));
+  Fh2Publish(size);
+}
+
+Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
+                                           const uint32_t* host_address, uint32_t dword_count) {
+  if (Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    Fh2LoadShaderImpl(shader_type, host_address, dword_count);
+    return shader_type == xenos::ShaderType::kVertex ? fh2_draw_vertex_shader_
+                                                     : fh2_draw_pixel_shader_;
+  }
+  uint32_t size = Fh2AlignOp(uint32_t(sizeof(Fh2OpHeader)) + 8 + dword_count * 4);
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(size));
+  op->type = Fh2OpType::kShader;
+  op->size = size;
+  auto* words = reinterpret_cast<uint32_t*>(op + 1);
+  words[0] = uint32_t(shader_type);
+  words[1] = dword_count;
+  std::memcpy(words + 2, host_address, dword_count * sizeof(uint32_t));
+  Fh2Publish(size);
+  // The base class's active shaders are unused (the draw side keeps its own).
+  return nullptr;
+}
+
+bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+                                       bool major_mode_explicit) {
+  if (g_fh2_draw_side || Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    return IssueDrawImpl(prim_type, index_count, index_buffer_info, major_mode_explicit);
+  }
+  uint32_t size = Fh2AlignOp(uint32_t(sizeof(Fh2DrawOp)));
+  auto* op = reinterpret_cast<Fh2DrawOp*>(Fh2Reserve(size));
+  op->header.type = Fh2OpType::kDraw;
+  op->header.size = size;
+  op->prim_type = prim_type;
+  op->index_count = index_count;
+  op->has_index_buffer = index_buffer_info != nullptr;
+  op->major_mode_explicit = major_mode_explicit;
+  op->index_buffer_info = index_buffer_info ? *index_buffer_info : IndexBufferInfo();
+  Fh2Publish(size);
+  return true;
+}
+
+void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {
+  if (g_fh2_draw_side || Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    OnPm4TraceImpl(event, a, b);
+    return;
+  }
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(24));
+  op->type = Fh2OpType::kTrace;
+  op->size = 24;
+  auto* words = reinterpret_cast<uint32_t*>(op + 1);
+  words[0] = uint32_t(event);
+  words[1] = a;
+  words[2] = b;
+  Fh2Publish(24);
+}
+
+void VulkanCommandProcessor::OnPrimaryBufferEnd() {
+  if (g_fh2_draw_side || Fh2Inline()) {
+    Fh2DrawSideScope draw_side;
+    OnPrimaryBufferEndImpl();
+    return;
+  }
+  auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(8));
+  op->type = Fh2OpType::kPrimaryBufferEnd;
+  op->size = 8;
+  Fh2Publish(8);
 }
 
 }  // namespace rex::graphics::fh2vk

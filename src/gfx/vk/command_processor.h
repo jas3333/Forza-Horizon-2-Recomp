@@ -30,6 +30,7 @@
 #include <rex/assert.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/pipeline/shader/spirv_translator.h>
+#include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
 #include <rex/graphics/util/draw.h>
 #include "fh2_rtlog.h"
@@ -272,8 +273,73 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
+  void OnOrderedPacketBegin() override;
+  void OnOrderedPacketEnd() override;
 
  private:
+  // FH2 renderer split. The command thread (parser) reads the PM4 stream and
+  // keeps the main register file; register writes, shader loads, draws and
+  // trace events go through a single-producer queue to the draw thread,
+  // which owns a second register file (the one the caches read) and does all
+  // per-draw work. Packets with external side effects (fences, memory writes,
+  // waits, swaps, queries) drain the draw thread and run on the parser with
+  // the draw state idle. FH2_SPLIT=0: every operation runs inline on the
+  // parser (switchable live at the next ordered packet).
+  enum class Fh2OpType : uint32_t {
+    kWrap,
+    kRegister,
+    kRegisterRange,
+    kDraw,
+    kShader,
+    kTrace,
+    kPrimaryBufferEnd,
+  };
+  struct Fh2OpHeader {
+    Fh2OpType type;
+    uint32_t size;  // bytes, including the header, multiple of 8
+  };
+  struct Fh2DrawOp {
+    Fh2OpHeader header;
+    xenos::PrimitiveType prim_type;
+    uint32_t index_count;
+    uint32_t has_index_buffer;
+    uint32_t major_mode_explicit;
+    IndexBufferInfo index_buffer_info;
+  };
+  // Draw-side register file (the caches and all draw code read this one).
+  RegisterFile& dregs() { return *fh2_draw_regs_; }
+  const RegisterFile& dregs() const { return *fh2_draw_regs_; }
+  bool Fh2OnDrawSide() const;
+  // Parser side: run inline, or reserve queue space (nullptr = run inline).
+  bool Fh2Inline() const { return !fh2_split_threaded_ || fh2_in_ordered_; }
+  uint8_t* Fh2Reserve(uint32_t size);
+  void Fh2Publish(uint32_t size);
+  void Fh2Drain();
+  void Fh2DrawThreadMain();
+  void Fh2ExecuteOp(const Fh2OpHeader* op);
+  void Fh2StopDrawThread();
+  void Fh2SyncDrawRegisters();
+  // Draw-side implementations.
+  void DrawWriteRegister(uint32_t index, uint32_t value);
+  void DrawWriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers);
+  bool IssueDrawImpl(xenos::PrimitiveType prim_type, uint32_t index_count,
+                     IndexBufferInfo* index_buffer_info, bool major_mode_explicit);
+  void Fh2LoadShaderImpl(xenos::ShaderType shader_type, const uint32_t* host_address,
+                         uint32_t dword_count);
+  void OnPm4TraceImpl(Pm4TraceEvent event, uint32_t a, uint32_t b);
+  void OnPrimaryBufferEndImpl();
+  std::unique_ptr<RegisterFile> fh2_draw_regs_;
+  Shader* fh2_draw_vertex_shader_ = nullptr;
+  Shader* fh2_draw_pixel_shader_ = nullptr;
+  bool fh2_split_threaded_ = false;
+  bool fh2_in_ordered_ = false;
+  std::vector<uint8_t> fh2_queue_;
+  alignas(64) std::atomic<uint64_t> fh2_queue_head_{0};  // bytes published
+  alignas(64) std::atomic<uint64_t> fh2_queue_tail_{0};  // bytes executed
+  alignas(64) std::atomic<uint32_t> fh2_draw_sleeping_{0};
+  std::atomic<bool> fh2_draw_stop_{false};
+  std::thread fh2_draw_thread_;
+
   struct CommandBuffer {
     VkCommandPool pool;
     VkCommandBuffer buffer;

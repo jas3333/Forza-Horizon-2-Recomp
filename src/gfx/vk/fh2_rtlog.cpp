@@ -149,8 +149,9 @@ int TimedEnvInt(const char* name, int default_value) {
     uint64_t frame;
     int value;
   };
-  static CacheEntry cache[64];
-  static uint32_t cache_size = 0;
+  // Per thread (parser and draw thread both call this).
+  static thread_local CacheEntry cache[64];
+  static thread_local uint32_t cache_size = 0;
   for (uint32_t i = 0; i < cache_size; ++i) {
     CacheEntry& entry = cache[i];
     if (entry.name == name && entry.default_value == default_value) {
@@ -195,6 +196,8 @@ int TimedEnvIntUncached(const char* name, int default_value) {
     int value;
   };
   static std::map<std::string, std::vector<Step>> parsed;
+  static std::mutex parsed_mutex;
+  std::lock_guard<std::mutex> parsed_lock(parsed_mutex);
   auto it = parsed.find(name);
   if (it == parsed.end()) {
     std::vector<Step> steps;

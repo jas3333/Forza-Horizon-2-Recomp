@@ -179,6 +179,13 @@ class CommandProcessor {
 
   uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
   virtual void OnPrimaryBufferEnd() {}
+  // Around packets with side effects outside the register file (fences,
+  // memory writes, waits, interrupts, swaps, queries) and around queued
+  // CallInThread functions: a backend that processes draws on another thread
+  // finishes everything before them (and runs them in order).
+  virtual void OnOrderedPacketBegin() {}
+  virtual void OnOrderedPacketEnd() {}
+  static bool IsOrderedPacketOpcode(uint32_t opcode);
   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
   bool ExecutePacket(memory::RingBuffer* reader);
   bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);
