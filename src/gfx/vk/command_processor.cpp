@@ -4432,9 +4432,22 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
                                fetch.size_2d.width + 1, fetch.size_2d.height + 1);
       }
     }
-    fh2::rtlog::Log("D {:016X} m{:X} vs {:016X} ps {:016X}{}", XXH3_64bits_digest(fp_state),
+    // Blend state of render target 0 (RB_BLENDCONTROL0, color mask, blend
+    // constants) -- for colour bugs that depend on blending.
+    std::string fh2_blend;
+    if (Fh2DrawBlends()) {
+      fh2_blend = fmt::format(" blend0={:08X} cmask={:08X} const=({:.3f},{:.3f},{:.3f},{:.3f})",
+                              fp_regs[XE_GPU_REG_RB_BLENDCONTROL0], fp_regs[XE_GPU_REG_RB_COLOR_MASK],
+                              fp_regs.Get<float>(XE_GPU_REG_RB_BLEND_RED),
+                              fp_regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN),
+                              fp_regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE),
+                              fp_regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA));
+    } else {
+      fh2_blend = fmt::format(" cmask={:08X}", fp_regs[XE_GPU_REG_RB_COLOR_MASK]);
+    }
+    fh2::rtlog::Log("D {:016X} m{:X} vs {:016X} ps {:016X}{}{}", XXH3_64bits_digest(fp_state),
                     uint32_t(bin_mask_), vertex_shader->ucode_data_hash(),
-                    pixel_shader ? pixel_shader->ucode_data_hash() : 0, fh2_tex);
+                    pixel_shader ? pixel_shader->ucode_data_hash() : 0, fh2_tex, fh2_blend);
     if (fh2_log_next_draw_placement_) {
       fh2_log_next_draw_placement_ = false;
       auto window_offset = fp_regs.Get<reg::PA_SC_WINDOW_OFFSET>();
