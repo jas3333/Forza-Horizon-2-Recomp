@@ -113,6 +113,16 @@ if(NOT WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk)
     target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
     target_link_options(rexgpu-fh2 PRIVATE -Wl,--no-undefined)
+    # The command thread (PM4 parsing, register file, render target / texture
+    # caches -- all compiled into this library) is the bottleneck in busy
+    # scenes: ThinLTO inlines across those files, x86-64-v3 for AVX2/BMI.
+    # No FMA contraction, so float results stay as before.
+    option(FH2_GPU_LTO "ThinLTO + x86-64-v3 for the fh2 renderer plugin" ON)
+    if(FH2_GPU_LTO)
+        target_compile_options(rexgpu-fh2 PRIVATE -flto=thin -march=x86-64-v3 -ffp-contract=off)
+        target_link_options(rexgpu-fh2 PRIVATE -flto=thin -fuse-ld=lld -march=x86-64-v3
+                            -Wl,--thinlto-cache-dir=${CMAKE_BINARY_DIR}/thinlto-cache)
+    endif()
     target_compile_definitions(rexgpu-fh2 PRIVATE REX_HAS_VULKAN=1)
     target_link_libraries(rexgpu-fh2 PRIVATE rexruntime xxHash::xxhash Vulkan::Headers
         GPUOpen::VulkanMemoryAllocator glslang::SPIRV glslang MachineIndependent
