@@ -260,7 +260,7 @@ void CommandProcessor::WorkerThreadMain() {
 
   while (worker_running_) {
     if (!pending_fns_.empty()) {
-      OnOrderedPacketBegin();
+      OnOrderedPacketBegin(UINT32_MAX);
       while (!pending_fns_.empty()) {
         auto fn = std::move(pending_fns_.front());
         pending_fns_.pop();
@@ -875,7 +875,7 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
   bool result = false;
   bool ordered = IsOrderedPacketOpcode(opcode);
   if (ordered) {
-    OnOrderedPacketBegin();
+    OnOrderedPacketBegin(opcode);
   }
   switch (opcode) {
     case PM4_ME_INIT:

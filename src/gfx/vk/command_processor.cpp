@@ -7643,20 +7643,28 @@ void VulkanCommandProcessor::Fh2ExecuteOp(const Fh2OpHeader* op) {
 }
 
 void VulkanCommandProcessor::Fh2SyncDrawRegisters() {
-  // Ordered packets may write the parser's register file directly (query
-  // status bits); bring the draw-side file up to date.
-  Fh2DrawSideScope draw_side;
-  const uint32_t* parser_values = register_file_->values;
-  uint32_t* draw_values = dregs().values;
-  for (uint32_t i = 0; i < RegisterFile::kRegisterCount; ++i) {
-    uint32_t value = parser_values[i];
-    if (draw_values[i] != value) {
-      DrawWriteRegister(i, value);
-    }
+  // The base packet handlers write the register file directly (not through
+  // WriteRegister) only for the visibility query status bits.
+  for (uint32_t index :
+       {uint32_t(XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_0), uint32_t(XE_GPU_REG_PA_SC_VIZ_QUERY_STATUS_1)}) {
+    dregs().values[index] = register_file_->values[index];
   }
 }
 
-void VulkanCommandProcessor::OnOrderedPacketBegin() {
+void VulkanCommandProcessor::OnOrderedPacketBegin(uint32_t opcode) {
+  ++fh2_ordered_counts_[std::min(opcode, uint32_t(128))];
+  if (opcode == xenos::PM4_XE_SWAP && ++fh2_ordered_report_frames_ >= 300) {
+    std::string text;
+    for (uint32_t i = 0; i < 129; ++i) {
+      if (fh2_ordered_counts_[i]) {
+        text += fmt::format(" {}:{:.1f}", i == 128 ? std::string("fn") : fmt::format("{:02X}", i),
+                            double(fh2_ordered_counts_[i]) / fh2_ordered_report_frames_);
+        fh2_ordered_counts_[i] = 0;
+      }
+    }
+    REXGPU_INFO("[SPLIT] ordered packets per frame by opcode:{}", text);
+    fh2_ordered_report_frames_ = 0;
+  }
   Fh2Drain();
   bool want_thread = fh2::rtlog::TimedEnvInt("FH2_SPLIT", 1) != 0;
   if (want_thread && !fh2_draw_thread_.joinable()) {

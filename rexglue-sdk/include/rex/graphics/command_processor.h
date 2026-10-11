@@ -183,7 +183,8 @@ class CommandProcessor {
   // memory writes, waits, interrupts, swaps, queries) and around queued
   // CallInThread functions: a backend that processes draws on another thread
   // finishes everything before them (and runs them in order).
-  virtual void OnOrderedPacketBegin() {}
+  // opcode: the PM4 type-3 opcode, or UINT32_MAX for CallInThread functions.
+  virtual void OnOrderedPacketBegin(uint32_t opcode) {}
   virtual void OnOrderedPacketEnd() {}
   static bool IsOrderedPacketOpcode(uint32_t opcode);
   void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);

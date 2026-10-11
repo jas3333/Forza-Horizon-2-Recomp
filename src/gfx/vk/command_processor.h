@@ -273,7 +273,7 @@ class VulkanCommandProcessor : public CommandProcessor {
   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
   bool IssueCopy() override;
-  void OnOrderedPacketBegin() override;
+  void OnOrderedPacketBegin(uint32_t opcode) override;
   void OnOrderedPacketEnd() override;
 
  private:
@@ -333,6 +333,8 @@ class VulkanCommandProcessor : public CommandProcessor {
   Shader* fh2_draw_pixel_shader_ = nullptr;
   bool fh2_split_threaded_ = false;
   bool fh2_in_ordered_ = false;
+  uint64_t fh2_ordered_counts_[129] = {};  // per opcode (128 = CallInThread)
+  uint32_t fh2_ordered_report_frames_ = 0;
   std::vector<uint8_t> fh2_queue_;
   alignas(64) std::atomic<uint64_t> fh2_queue_head_{0};  // bytes published
   alignas(64) std::atomic<uint64_t> fh2_queue_tail_{0};  // bytes executed
