@@ -3327,7 +3327,8 @@ bool VulkanTextureCache::Fh2InitializeDirectResolve() {
   const auto& ifn = vulkan_device->vulkan_instance()->functions();
   for (xenos::TextureFormat format :
        {xenos::TextureFormat::k_8_8_8_8, xenos::TextureFormat::k_2_10_10_10,
-        xenos::TextureFormat::k_32_FLOAT}) {
+        xenos::TextureFormat::k_32_FLOAT, xenos::TextureFormat::k_24_8,
+        xenos::TextureFormat::k_24_8_FLOAT}) {
     TextureKey key;
     key.format = format;
     const HostFormatPair& pair = GetHostFormatPair(key);

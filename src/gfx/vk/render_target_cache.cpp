@@ -1353,11 +1353,14 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           const char* fh2_miss_reason = nullptr;
           bool fh2_direct_ok = false;
           // FH2_DIRECT_RESOLVE: 0 off, 1 all, 2 only full-width (>= 1280)
-          // resolves, 3 only smaller ones (bisecting).
+          // resolves, 3 only smaller ones (bisecting), 4 color only.
           int fh2_direct_mode = fh2::rtlog::TimedEnvInt("FH2_DIRECT_RESOLVE", 1);
           uint32_t fh2_resolve_width = uint32_t(resolve_info.coordinate_info.width_div_8) * 8;
+          bool fh2_resolve_is_depth =
+              resolve_info.rb_copy_control.copy_src_select >= xenos::kMaxColorRenderTargets;
           if (fh2_direct_mode == 1 || (fh2_direct_mode == 2 && fh2_resolve_width >= 1280) ||
-              (fh2_direct_mode == 3 && fh2_resolve_width < 1280)) {
+              (fh2_direct_mode == 3 && fh2_resolve_width < 1280) ||
+              (fh2_direct_mode == 4 && !fh2_resolve_is_depth)) {
             fh2_direct_ok =
                 Fh2PrepareDirectResolve(resolve_info, texture_cache, fh2_direct, fh2_miss_reason);
           }
@@ -6421,6 +6424,76 @@ void main() {
 }
 )";
 
+const char kFh2ResolveDepthShader[] = R"(#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#if SAMPLES > 1
+layout(set = 0, binding = 0) uniform texture2DMS src;
+#else
+layout(set = 0, binding = 0) uniform texture2D src;
+#endif
+layout(set = 1, binding = 0) uniform writeonly image2D dst;
+layout(push_constant) uniform Constants {
+  ivec2 src_offset;
+  ivec2 dst_offset;
+  ivec2 size;
+  float scale;
+  uint flags;  // bits 8:9 - host sample
+} c;
+// xenos::Float32To20e4 / Float20e4To32.
+uint Float32To20e4(float f) {
+  if (!(f > 0.0)) {
+    return 0u;
+  }
+  uint u = floatBitsToUint(f);
+  if (u >= 0x3FFFFFF8u) {
+    return 0xFFFFFFu;
+  }
+  if (u < 0x38800000u) {
+    uint shift = min(113u - (u >> 23u), 24u);
+    u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
+  } else {
+    u += 0xC8000000u;
+  }
+#if ROUND_FLOAT24
+  u += 3u + ((u >> 3u) & 1u);
+#endif
+  return (u >> 3u) & 0xFFFFFFu;
+}
+float Float20e4To32(uint f24) {
+  if (f24 == 0u) {
+    return 0.0;
+  }
+  uint mantissa = f24 & 0xFFFFFu;
+  uint exponent = f24 >> 20u;
+  if (exponent == 0u) {
+    uint lz = uint(31 - findMSB(mantissa)) - 11u;
+    exponent = uint(1 - int(lz));
+    mantissa = (mantissa << lz) & 0xFFFFFu;
+  }
+  return uintBitsToFloat(((exponent + 112u) << 23u) | (mantissa << 3u));
+}
+void main() {
+  ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+  if (any(greaterThanEqual(p, c.size))) {
+    return;
+  }
+#if SAMPLES > 1
+  float depth = texelFetch(src, c.src_offset + p, int((c.flags >> 8u) & 3u)).r;
+#else
+  float depth = texelFetch(src, c.src_offset + p, 0).r;
+#endif
+#if FLOAT24
+  float value = Float20e4To32(Float32To20e4(depth));
+#else
+  // Like the EDRAM dump (round to nearest even) and xenos::UNorm24To32.
+  uint n24 = uint(roundEven(depth * 16777215.0));
+  float value = float(n24 + (n24 >> 23u)) * (1.0 / 16777216.0);
+#endif
+  imageStore(dst, c.dst_offset + p, vec4(value, 0.0, 0.0, 0.0));
+}
+)";
+
 struct Fh2ResolveConstants {
   int32_t src_offset[2];
   int32_t dst_offset[2];
@@ -6473,6 +6546,34 @@ bool VulkanRenderTargetCache::Fh2EnsureDirectResolvePipelines(VulkanTextureCache
           vulkan_device, fh2_resolve_pipeline_layout_, spirv.data(), spirv.size() * sizeof(uint32_t));
     }
   }
+  VkDescriptorSetLayout depth_set_layouts[2] = {descriptor_set_layout_sampled_image_x2_,
+                                                texture_cache.fh2_storage_set_layout()};
+  layout_info.pSetLayouts = depth_set_layouts;
+  if (dfn.vkCreatePipelineLayout(device, &layout_info, nullptr,
+                                 &fh2_resolve_depth_pipeline_layout_) != VK_SUCCESS) {
+    fh2_resolve_depth_pipeline_layout_ = VK_NULL_HANDLE;
+  } else {
+    for (uint32_t samples_index = 0; samples_index < 3; ++samples_index) {
+      for (uint32_t float24 = 0; float24 < 2; ++float24) {
+        std::string source(kFh2ResolveDepthShader);
+        source.insert(source.find('\n') + 1,
+                      fmt::format("#define SAMPLES {}\n#define FLOAT24 {}\n#define ROUND_FLOAT24 {}\n",
+                                  kSamples[samples_index], float24,
+                                  REXCVAR_GET(depth_float24_round) ? 1 : 0));
+        std::vector<uint32_t> spirv;
+        std::string error;
+        if (!command_processor_.CompileGlslToSpirv(VK_SHADER_STAGE_COMPUTE_BIT, source, spirv,
+                                                   error)) {
+          REXGPU_ERROR("fh2gfx: direct depth resolve shader failed to compile: {}", error);
+          continue;
+        }
+        fh2_resolve_depth_pipelines_[samples_index][float24] =
+            ui::vulkan::util::CreateComputePipeline(vulkan_device,
+                                                    fh2_resolve_depth_pipeline_layout_,
+                                                    spirv.data(), spirv.size() * sizeof(uint32_t));
+      }
+    }
+  }
   REXGPU_INFO("fh2gfx: direct resolve pipelines ready");
   return true;
 }
@@ -6491,6 +6592,16 @@ void VulkanRenderTargetCache::Fh2ShutdownDirectResolve() {
     dfn.vkDestroyPipelineLayout(device, fh2_resolve_pipeline_layout_, nullptr);
     fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
   }
+  for (auto& row : fh2_resolve_depth_pipelines_) {
+    for (VkPipeline& pipeline : row) {
+      if (pipeline) dfn.vkDestroyPipeline(device, pipeline, nullptr);
+      pipeline = VK_NULL_HANDLE;
+    }
+  }
+  if (fh2_resolve_depth_pipeline_layout_) {
+    dfn.vkDestroyPipelineLayout(device, fh2_resolve_depth_pipeline_layout_, nullptr);
+    fh2_resolve_depth_pipeline_layout_ = VK_NULL_HANDLE;
+  }
   fh2_resolve_pipelines_attempted_ = false;
 }
 
@@ -6500,41 +6611,76 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
                                                       const char*& miss_reason) {
   miss_reason = nullptr;
   const auto& control = resolve_info.rb_copy_control;
-  if (control.copy_src_select >= xenos::kMaxColorRenderTargets ||
-      control.copy_command != xenos::CopyCommand::kConvert) {
-    return false;  // depth / raw copies: not handled (not counted as misses)
+  bool is_depth = control.copy_src_select >= xenos::kMaxColorRenderTargets;
+  if (is_depth ? control.copy_command != xenos::CopyCommand::kRaw
+               : control.copy_command != xenos::CopyCommand::kConvert) {
+    return false;  // not handled (not counted as misses)
   }
-  const auto& edram = resolve_info.color_edram_info;
+  const auto& edram = is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
   const auto& dest = resolve_info.copy_dest_info;
-  auto rt_format = xenos::ColorRenderTargetFormat(edram.format);
   auto dest_format = xenos::TextureFormat(uint32_t(dest.copy_dest_format));
-  if (edram.format_is_64bpp || !VulkanTextureCache::Fh2IsDirectResolveFormat(dest_format)) {
-    miss_reason = "format";
-    return false;
+  xenos::ColorRenderTargetFormat rt_format = xenos::ColorRenderTargetFormat(edram.format);
+  auto depth_format = xenos::DepthRenderTargetFormat(edram.format);
+  if (is_depth) {
+    // Depth into the matching 24-bit depth texture format only.
+    bool depth_float = depth_format == xenos::DepthRenderTargetFormat::kD24FS8;
+    if (dest_format != (depth_float ? xenos::TextureFormat::k_24_8_FLOAT
+                                    : xenos::TextureFormat::k_24_8)) {
+      miss_reason = "depth format pair";
+      return false;
+    }
+    out.depth_float = depth_float;
+  } else {
+    if (edram.format_is_64bpp || !VulkanTextureCache::Fh2IsDirectResolveFormat(dest_format) ||
+        dest_format == xenos::TextureFormat::k_24_8 ||
+        dest_format == xenos::TextureFormat::k_24_8_FLOAT) {
+      miss_reason = "format";
+      return false;
+    }
+    bool rt_is_32f = rt_format == xenos::ColorRenderTargetFormat::k_32_FLOAT;
+    if (rt_is_32f != (dest_format == xenos::TextureFormat::k_32_FLOAT) ||
+        rt_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+      miss_reason = "format pair";
+      return false;
+    }
   }
-  bool rt_is_32f = rt_format == xenos::ColorRenderTargetFormat::k_32_FLOAT;
-  if (rt_is_32f != (dest_format == xenos::TextureFormat::k_32_FLOAT) ||
-      rt_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
-    miss_reason = "format pair";
-    return false;
-  }
+  out.is_depth = is_depth;
   xenos::MsaaSamples msaa = edram.msaa_samples;
   auto sample_select = resolve_info.copy_dest_coordinate_info.copy_sample_select;
   uint32_t samples_index;
+  out.host_sample = 0;
   switch (msaa) {
     case xenos::MsaaSamples::k1X:
       samples_index = 0;
       break;
     case xenos::MsaaSamples::k2X:
-      if (!msaa_2x_attachments_supported_ || (sample_select != xenos::CopySampleSelect::k01 &&
-                                              sample_select != xenos::CopySampleSelect::k0123)) {
+      if (!msaa_2x_attachments_supported_) {
+        miss_reason = "2x without native 2x";
+        return false;
+      }
+      if (is_depth) {
+        if (sample_select > xenos::CopySampleSelect::k1) {
+          miss_reason = "2x depth sample select";
+          return false;
+        }
+        out.host_sample =
+            draw_util::GetD3D10SampleIndexForGuest2xMSAA(uint32_t(sample_select), true);
+      } else if (sample_select != xenos::CopySampleSelect::k01 &&
+                 sample_select != xenos::CopySampleSelect::k0123) {
         miss_reason = "2x sample select";
         return false;
       }
       samples_index = 1;
       break;
     default:
-      if (sample_select != xenos::CopySampleSelect::k0123) {
+      if (is_depth) {
+        // Guest sample s is host sample s (bit 0 horizontal, bit 1 vertical).
+        if (sample_select > xenos::CopySampleSelect::k3) {
+          miss_reason = "4x depth sample select";
+          return false;
+        }
+        out.host_sample = uint32_t(sample_select);
+      } else if (sample_select != xenos::CopySampleSelect::k0123) {
         miss_reason = "4x sample select";
         return false;
       }
@@ -6557,9 +6703,13 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
     return false;
   }
   RenderTargetKey rt_key = source->key();
-  if (rt_key.is_depth || rt_key.msaa_samples != msaa || rt_key.GetPitchTiles() != edram.pitch_tiles ||
-      xenos::ColorRenderTargetFormat(rt_key.resource_format) !=
-          xenos::GetStorageColorFormat(rt_format)) {  // gamma excluded above
+  bool key_matches =
+      bool(rt_key.is_depth) == is_depth && rt_key.msaa_samples == msaa &&
+      rt_key.GetPitchTiles() == edram.pitch_tiles &&
+      (is_depth ? rt_key.GetDepthFormat() == depth_format
+                : xenos::ColorRenderTargetFormat(rt_key.resource_format) ==
+                      xenos::GetStorageColorFormat(rt_format));  // gamma excluded above
+  if (!key_matches) {
     miss_reason = "source RT key";
     return false;
   }
@@ -6582,8 +6732,11 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
     return false;
   }
   bool integer_view = false;
-  GetColorOwnershipTransferVulkanFormat(rt_format, msaa, &integer_view);
-  if (!fh2_resolve_pipelines_[samples_index][integer_view]) {
+  if (!is_depth) {
+    GetColorOwnershipTransferVulkanFormat(rt_format, msaa, &integer_view);
+  }
+  if (is_depth ? !fh2_resolve_depth_pipelines_[samples_index][out.depth_float]
+               : !fh2_resolve_pipelines_[samples_index][integer_view]) {
     miss_reason = "pipeline variant";
     return false;
   }
@@ -6622,7 +6775,7 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   out.src_y = int32_t(src_y * scale_y);
   out.samples_index = samples_index;
   out.integer_view = integer_view;
-  out.scale = std::ldexp(1.0f, int32_t(dest.copy_dest_exp_bias));
+  out.scale = is_depth ? 1.0f : std::ldexp(1.0f, int32_t(dest.copy_dest_exp_bias));
   out.swap_red_blue = dest.copy_dest_swap && dest_format != xenos::TextureFormat::k_32_FLOAT;
   return true;
 }
@@ -6630,8 +6783,16 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
 void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture_cache,
                                                      const Fh2DirectResolve& direct) {
   VulkanRenderTarget& rt = *direct.source;
+  VkPipelineLayout pipeline_layout =
+      direct.is_depth ? fh2_resolve_depth_pipeline_layout_ : fh2_resolve_pipeline_layout_;
+  VkPipeline pipeline =
+      direct.is_depth ? fh2_resolve_depth_pipelines_[direct.samples_index][direct.depth_float]
+                      : fh2_resolve_pipelines_[direct.samples_index][direct.integer_view];
   command_processor_.PushImageMemoryBarrier(
-      rt.image(), ui::vulkan::util::InitializeSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT),
+      rt.image(),
+      ui::vulkan::util::InitializeSubresourceRange(
+          direct.is_depth ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                          : VK_IMAGE_ASPECT_COLOR_BIT),
       rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, rt.current_access_mask(),
       VK_ACCESS_SHADER_READ_BIT, rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
   rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
@@ -6641,12 +6802,11 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     VulkanTextureCache::VulkanTexture& texture = *write.target.texture;
     texture_cache.Fh2BeginResolveWrite(texture);
     command_processor_.SubmitBarriers(true);
-    command_processor_.BindExternalComputePipeline(
-        fh2_resolve_pipelines_[direct.samples_index][direct.integer_view]);
+    command_processor_.BindExternalComputePipeline(pipeline);
     VkDescriptorSet sets[2] = {rt.GetDescriptorSetTransferSource(),
                                texture.Fh2GetStorageDescriptorSet()};
-    command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE,
-                                           fh2_resolve_pipeline_layout_, 0, 2, sets, 0, nullptr);
+    command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 2,
+                                           sets, 0, nullptr);
     Fh2ResolveConstants constants;
     constants.src_offset[0] = direct.src_x;
     constants.src_offset[1] = direct.src_y;
@@ -6655,8 +6815,8 @@ void VulkanRenderTargetCache::Fh2RecordDirectResolve(VulkanTextureCache& texture
     constants.size[0] = int32_t(write.width);
     constants.size[1] = int32_t(write.height);
     constants.scale = direct.scale;
-    constants.flags = direct.swap_red_blue ? 1u : 0u;
-    command_buffer.CmdVkPushConstants(fh2_resolve_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+    constants.flags = (direct.swap_red_blue ? 1u : 0u) | (direct.host_sample << 8);
+    command_buffer.CmdVkPushConstants(pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                       sizeof(constants), &constants);
     command_processor_.Fh2GpuMark(fh2::rtlog::GpuCategory::kResolveCopy);
     command_buffer.CmdVkDispatch((write.width + 7) / 8, (write.height + 7) / 8, 1);

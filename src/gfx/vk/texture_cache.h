@@ -355,7 +355,9 @@ class VulkanTextureCache final : public TextureCache {
   static bool Fh2IsDirectResolveFormat(xenos::TextureFormat format) {
     return format == xenos::TextureFormat::k_8_8_8_8 ||
            format == xenos::TextureFormat::k_2_10_10_10 ||
-           format == xenos::TextureFormat::k_32_FLOAT;
+           format == xenos::TextureFormat::k_32_FLOAT ||
+           format == xenos::TextureFormat::k_24_8 ||
+           format == xenos::TextureFormat::k_24_8_FLOAT;
   }
 
  private:

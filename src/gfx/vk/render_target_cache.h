@@ -935,6 +935,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     int32_t src_x = 0, src_y = 0;  // scaled pixels in the render target
     uint32_t samples_index = 0;      // 0: 1x, 1: 2x, 2: 4x
     bool integer_view = false;
+    // Depth: the host sample to take and whether the guest format is 20e4.
+    bool is_depth = false;
+    bool depth_float = false;
+    uint32_t host_sample = 0;
     float scale = 1.0f;
     bool swap_red_blue = false;
   };
@@ -946,6 +950,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   void Fh2ShutdownDirectResolve();
   VkPipelineLayout fh2_resolve_pipeline_layout_ = VK_NULL_HANDLE;
   VkPipeline fh2_resolve_pipelines_[3][2] = {};
+  VkPipelineLayout fh2_resolve_depth_pipeline_layout_ = VK_NULL_HANDLE;
+  VkPipeline fh2_resolve_depth_pipelines_[3][2] = {};  // [samples][float24]
   bool fh2_resolve_pipelines_attempted_ = false;
   uint64_t fh2_next_render_target_id_ = 1;
   // Narrows the transfers into each bound render target to the rows the
