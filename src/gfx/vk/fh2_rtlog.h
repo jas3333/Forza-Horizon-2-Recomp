@@ -54,6 +54,8 @@ struct Counters {
   uint64_t transfers_deferred = 0;  // transfers skipped as nothing read the target yet
   uint64_t transfers_cleared = 0;   // copy-backs replaced by depth clears
   uint64_t shaders_translated = 0;
+  uint64_t wait_reg_mem_blocks = 0;  // WAIT_REG_MEMs that had to wait
+  uint64_t fence_wait_ns = 0;        // time in submission fence checks / waits
   uint64_t pipelines_created = 0;
   uint64_t transfers_materialized = 0;  // deferred copies made real later
   uint64_t direct_resolve_misses = 0;  // color resolves that couldn't be

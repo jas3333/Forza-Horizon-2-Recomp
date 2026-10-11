@@ -1138,6 +1138,8 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
   bool is_memory = (wait_info & 0x10) != 0;
 
   bool matched = false;
+  uint32_t wait_polls = 0;
+  auto first_wait_start = std::chrono::steady_clock::now();
   do {
     uint32_t value = 0;
     if (is_memory) {
@@ -1182,12 +1184,16 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       if (wait >= 0x100) {
         auto wait_start = std::chrono::steady_clock::now();
         PrepareForWait();
-        if (!REXCVAR_GET(vsync)) {
-          // User wants it fast and dangerous.
+        if (!REXCVAR_GET(vsync) || wait_polls < 64) {
+          // Spin (yielding) first: the awaited value usually arrives within
+          // microseconds, and whole-millisecond sleeps cost FH2 ~5 ms per
+          // frame in busy scenes.
           rex::thread::MaybeYield();
         } else {
-          rex::thread::Sleep(std::chrono::milliseconds(wait / 0x100));
+          // Then poll at 100 us instead of wait / 0x100 milliseconds.
+          rex::thread::Sleep(std::chrono::microseconds(100));
         }
+        ++wait_polls;
         rex::thread::SyncMemory();
         ReturnFromWait();
         g_command_processor_wait_reg_mem_ns.fetch_add(
@@ -1205,6 +1211,12 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
       }
     }
   } while (!matched);
+  if (wait_polls) {
+    OnPm4Trace(Pm4TraceEvent::kWaitRegMem, poll_reg_addr,
+               uint32_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - first_wait_start)
+                            .count()));
+  }
 
   return true;
 }

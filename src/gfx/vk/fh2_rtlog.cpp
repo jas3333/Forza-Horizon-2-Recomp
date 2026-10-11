@@ -205,13 +205,16 @@ void OnSwap() {
         REXGPU_INFO(
             "[SPIKE] frame {}: {:.1f} ms -- command thread idle {:.1f} ms, WAIT_REG_MEM {:.1f} ms; "
             "draws {}, texture loads {} ({:.2f} MB), resolves {}, transfers {}, new shaders {}, "
-            "new pipelines {}, GPU (completed) {:.1f} ms",
+            "new pipelines {}, GPU (completed) {:.1f} ms, blocking WAIT_REG_MEMs {}, fence waits "
+            "{:.1f} ms",
             g_frame, frame_ms, double(idle_ns - g_frame_start_idle_ns) / 1e6,
             double(wait_ns - g_frame_start_wait_ns) / 1e6, c.draws - s.draws,
             c.tex_loads - s.tex_loads, double(c.tex_load_bytes - s.tex_load_bytes) / 1e6,
             c.resolves - s.resolves, c.transfers - s.transfers,
             c.shaders_translated - s.shaders_translated,
-            c.pipelines_created - s.pipelines_created, double(c.gpu_ns - s.gpu_ns) / 1e6);
+            c.pipelines_created - s.pipelines_created, double(c.gpu_ns - s.gpu_ns) / 1e6,
+            c.wait_reg_mem_blocks - s.wait_reg_mem_blocks,
+            double(c.fence_wait_ns - s.fence_wait_ns) / 1e6);
       }
     }
     g_last_swap = now;

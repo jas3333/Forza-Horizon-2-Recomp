@@ -272,7 +272,7 @@ class CommandProcessor {
 
   // Packet-stream trace for backends (predicated tiling analysis): indirect
   // buffer calls, bin select changes and draws skipped by the bin check.
-  enum class Pm4TraceEvent { kIndirectBuffer, kBinSelect, kPredicatedSkip };
+  enum class Pm4TraceEvent { kIndirectBuffer, kBinSelect, kPredicatedSkip, kWaitRegMem };
   virtual void OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_t b) {}
 
   uint64_t bin_select_ = 0xFFFFFFFFull;

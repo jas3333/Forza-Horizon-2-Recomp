@@ -5005,6 +5005,10 @@ void VulkanCommandProcessor::OnPm4Trace(Pm4TraceEvent event, uint32_t a, uint32_
     case Pm4TraceEvent::kPredicatedSkip:
       ++fh2::rtlog::g_counters.predicated_skips;
       break;
+    case Pm4TraceEvent::kWaitRegMem:
+      ++fh2::rtlog::g_counters.wait_reg_mem_blocks;
+      fh2::rtlog::Log("WAIT_REG_MEM on {:08X}: {} us", a, b);
+      break;
   }
 }
 
@@ -5054,6 +5058,15 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
 }
 
 void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
+  auto fh2_fence_wait_start = std::chrono::steady_clock::now();
+  struct Fh2FenceWaitTimer {
+    std::chrono::steady_clock::time_point start;
+    ~Fh2FenceWaitTimer() {
+      fh2::rtlog::g_counters.fence_wait_ns += uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start)
+              .count());
+    }
+  } fh2_fence_wait_timer{fh2_fence_wait_start};
   // Only report once, no need to retry a wait that won't succeed anyway.
   if (device_lost_) {
     return;
