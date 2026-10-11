@@ -6696,8 +6696,11 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
     narrowed.reserve(list.size());
     for (const Transfer& transfer : list) {
       auto* source = static_cast<VulkanRenderTarget*>(transfer.source);
+      // For a virtual (deferred) copy the generation doesn't need to match:
+      // the destination can only have drawn into tiles it owned, and the
+      // tiles transferred back now are ones the copy owned.
       bool provenance = source->fh2_copied_from_id == dest->fh2_id &&
-                        source->fh2_copied_from_gen == dest->fh2_gen;
+                        (source->fh2_virtual || source->fh2_copied_from_gen == dest->fh2_gen);
       if (!provenance || source->fh2_dirty_y1 == VulkanRenderTarget::kFh2AllRows) {
         narrowed.push_back(transfer);
         continue;
@@ -6763,11 +6766,11 @@ void VulkanRenderTargetCache::Fh2NarrowTransfers(RenderTarget* const* render_tar
     // a deferred copy of the destination (a copy-back of its dirty rows): then
     // the destination is the real one, and the source a (virtual) copy of it.
     if (only_source && only_source->fh2_virtual) {
+      // The virtual copy keeps its dirty rows: only the tiles the destination
+      // asked for were copied back, the rest are still only in the copy.
       dest->Fh2ForgetProvenance();
       only_source->fh2_copied_from_id = dest->fh2_id;
       only_source->fh2_copied_from_gen = dest->fh2_gen;
-      only_source->fh2_dirty_y0 = 0;
-      only_source->fh2_dirty_y1 = 0;
     } else if (only_source) {
       ++dest->fh2_gen;
       dest->fh2_copied_from_id = only_source->fh2_id;
@@ -6889,8 +6892,7 @@ void VulkanRenderTargetCache::Fh2DeferAndMaterialize(
       // A copy-back into the deferred copy's own source is narrowed to the
       // real (dirty) rows -- if the provenance still holds; anything else
       // reads the garbage and needs the copy made first.
-      if (source->fh2_virtual && !(source->fh2_copied_from_id == dest->fh2_id &&
-                                   source->fh2_copied_from_gen == dest->fh2_gen)) {
+      if (source->fh2_virtual && source->fh2_copied_from_id != dest->fh2_id) {
         Fh2Materialize(source, "transfer to another target");
       }
     }
