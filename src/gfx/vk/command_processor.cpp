@@ -37,6 +37,8 @@
 
 #include "fh2_rtlog.h"
 
+#include <pthread.h>
+
 #include <xxhash.h>
 #include "pipeline_cache.h"
 #include "render_target_cache.h"
@@ -845,6 +847,9 @@ bool VulkanCommandProcessor::SetupContext() {
       }
     }
   }
+
+  fh2_submit_stop_ = false;
+  fh2_submit_thread_ = std::thread([this]() { Fh2SubmitThreadMain(); });
 
   // The unconditional inclusion of the vertex shader stage also covers the case
   // of manual index / factor buffer fetch (the system constants and the shared
@@ -1963,6 +1968,7 @@ bool VulkanCommandProcessor::SetupContext() {
 
 void VulkanCommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
+  Fh2StopSubmitThread();
   InvalidateAllVertexBufferResidency();
   ShutdownOcclusionQueryResources();
 
@@ -3030,6 +3036,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
         // presenter so it can submit its own commands for displaying it to the
         // queue, and also need to submit the release barrier.
         EndSubmission(true);
+        // The presenter submits its own work next: ours must be on the queue.
+        Fh2WaitSubmitted(GetCurrentSubmission() - 1);
         return true;
       });
 
@@ -5362,6 +5370,107 @@ void VulkanCommandProcessor::Fh2CollectTimestamps(uint64_t from_submission,
   }
 }
 
+bool VulkanCommandProcessor::Fh2SubmitJobNow(Fh2SubmitJob& job) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  VkCommandBuffer command_buffer = job.command_buffer.buffer;
+  if (dfn.vkResetCommandPool(device, job.command_buffer.pool, 0) != VK_SUCCESS) {
+    REXGPU_ERROR("Failed to reset a Vulkan command pool");
+    return false;
+  }
+  VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  if (dfn.vkBeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS) {
+    REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+    return false;
+  }
+  uint32_t slot = job.timestamp_slot;
+  if (fh2_timestamp_pool_) {
+    dfn.vkCmdResetQueryPool(command_buffer, fh2_timestamp_pool_, slot, 2);
+    if (fh2_mark_pool_) {
+      dfn.vkCmdResetQueryPool(command_buffer, fh2_mark_pool_, (slot / 2) * kFh2MarksPerSubmission,
+                              kFh2MarksPerSubmission);
+    }
+    dfn.vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            fh2_timestamp_pool_, slot);
+  }
+  deferred_command_buffer_.ExecuteStream(job.stream.data(), job.stream.size(), command_buffer);
+  if (fh2_timestamp_pool_) {
+    dfn.vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            fh2_timestamp_pool_, slot + 1);
+  }
+  if (dfn.vkEndCommandBuffer(command_buffer) != VK_SUCCESS) {
+    REXGPU_ERROR("Failed to end a Vulkan command buffer");
+    return false;
+  }
+  VkSubmitInfo submit_info{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  submit_info.waitSemaphoreCount = uint32_t(job.wait_semaphores.size());
+  submit_info.pWaitSemaphores = job.wait_semaphores.empty() ? nullptr : job.wait_semaphores.data();
+  submit_info.pWaitDstStageMask = job.wait_stages.empty() ? nullptr : job.wait_stages.data();
+  submit_info.commandBufferCount = 1;
+  submit_info.pCommandBuffers = &command_buffer;
+  VkResult submit_result;
+  {
+    ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
+        vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
+    submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, job.fence);
+  }
+  if (submit_result != VK_SUCCESS) {
+    REXGPU_ERROR("Failed to submit a Vulkan command buffer");
+    if (submit_result == VK_ERROR_DEVICE_LOST && graphics_system_) {
+      graphics_system_->OnHostGpuLossFromAnyThread(true);
+    }
+    fh2_submit_failed_.store(true, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+void VulkanCommandProcessor::Fh2SubmitThreadMain() {
+  pthread_setname_np(pthread_self(), "FH2 GPU submit");
+  std::unique_lock<std::mutex> lock(fh2_submit_mutex_);
+  while (true) {
+    fh2_submit_cv_.wait(lock, [this] { return fh2_submit_stop_ || !fh2_submit_queue_.empty(); });
+    if (fh2_submit_queue_.empty()) {
+      if (fh2_submit_stop_) break;
+      continue;
+    }
+    Fh2SubmitJob job = std::move(fh2_submit_queue_.front());
+    fh2_submit_queue_.pop_front();
+    lock.unlock();
+    Fh2SubmitJobNow(job);
+    lock.lock();
+    fh2_submitted_.store(job.submission, std::memory_order_release);
+    job.stream.clear();
+    fh2_free_streams_.push_back(std::move(job.stream));
+    fh2_submitted_cv_.notify_all();
+  }
+}
+
+void VulkanCommandProcessor::Fh2WaitSubmitted(uint64_t submission) {
+  if (fh2_submitted_.load(std::memory_order_acquire) >= submission) {
+    return;
+  }
+  std::unique_lock<std::mutex> lock(fh2_submit_mutex_);
+  fh2_submitted_cv_.wait(lock, [this, submission] {
+    return fh2_submitted_.load(std::memory_order_acquire) >= submission ||
+           fh2_submit_failed_.load(std::memory_order_acquire);
+  });
+}
+
+void VulkanCommandProcessor::Fh2StopSubmitThread() {
+  if (!fh2_submit_thread_.joinable()) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(fh2_submit_mutex_);
+    fh2_submit_stop_ = true;
+  }
+  fh2_submit_cv_.notify_all();
+  fh2_submit_thread_.join();
+}
+
 void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
   // Time only calls that may block (diagnostics; clock reads per draw cost
   // a few percent of the thread).
@@ -5398,7 +5507,16 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
 
-  size_t fences_total = submissions_in_flight_fences_.size();
+  // FH2 async submission: wait for the worker to have submitted what is
+  // awaited, and only poll fences it has submitted.
+  if (await_submission > submission_completed_) {
+    Fh2WaitSubmitted(await_submission);
+  }
+  size_t fences_total = std::min<size_t>(
+      submissions_in_flight_fences_.size(),
+      size_t(std::max<uint64_t>(fh2_submitted_.load(std::memory_order_acquire),
+                                submission_completed_) -
+             submission_completed_));
   size_t fences_awaited = 0;
   if (await_submission > submission_completed_) {
     // Await in a blocking way if requested.
@@ -5789,6 +5907,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       bind_sparse_info.signalSemaphoreCount = 1;
       bind_sparse_info.pSignalSemaphores = &bind_sparse_semaphore;
       VkResult bind_sparse_result;
+      Fh2WaitSubmitted(GetCurrentSubmission() - 1);
       {
         ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
             vulkan_device->AcquireQueue(vulkan_device->queue_family_sparse_binding(), 0);
@@ -5811,77 +5930,45 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
     assert_false(command_buffers_writable_.empty());
     CommandBuffer command_buffer = command_buffers_writable_.back();
-    if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
-      REXGPU_ERROR("Failed to reset a Vulkan command pool");
-      return false;
-    }
-    VkCommandBufferBeginInfo command_buffer_begin_info;
-    command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    command_buffer_begin_info.pNext = nullptr;
-    command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    command_buffer_begin_info.pInheritanceInfo = nullptr;
-    if (dfn.vkBeginCommandBuffer(command_buffer.buffer, &command_buffer_begin_info) != VK_SUCCESS) {
-      REXGPU_ERROR("Failed to begin a Vulkan command buffer");
-      return false;
-    }
-    uint32_t fh2_slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots) * 2;
-    if (fh2_timestamp_pool_) {
-      dfn.vkCmdResetQueryPool(command_buffer.buffer, fh2_timestamp_pool_, fh2_slot, 2);
-      if (fh2_mark_pool_) {
-        dfn.vkCmdResetQueryPool(command_buffer.buffer, fh2_mark_pool_,
-                                (fh2_slot / 2) * kFh2MarksPerSubmission, kFh2MarksPerSubmission);
-      }
-      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                              fh2_timestamp_pool_, fh2_slot);
-    }
-    deferred_command_buffer_.Execute(command_buffer.buffer);
-    // The next submission starts attributing from its beginning again.
-    fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
-    if (fh2_timestamp_pool_) {
-      dfn.vkCmdWriteTimestamp(command_buffer.buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                              fh2_timestamp_pool_, fh2_slot + 1);
-    }
-    if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
-      REXGPU_ERROR("Failed to end a Vulkan command buffer");
-      return false;
-    }
-
-    VkSubmitInfo submit_info;
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.pNext = nullptr;
-    if (!current_submission_wait_semaphores_.empty()) {
-      submit_info.waitSemaphoreCount = uint32_t(current_submission_wait_semaphores_.size());
-      submit_info.pWaitSemaphores = current_submission_wait_semaphores_.data();
-      submit_info.pWaitDstStageMask = current_submission_wait_stage_masks_.data();
-    } else {
-      submit_info.waitSemaphoreCount = 0;
-      submit_info.pWaitSemaphores = nullptr;
-      submit_info.pWaitDstStageMask = nullptr;
-    }
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer.buffer;
-    submit_info.signalSemaphoreCount = 0;
-    submit_info.pSignalSemaphores = nullptr;
     assert_false(fences_free_.empty());
     VkFence fence = fences_free_.back();
     if (dfn.vkResetFences(device, 1, &fence) != VK_SUCCESS) {
       REXGPU_ERROR("Failed to reset a Vulkan submission fence");
       return false;
     }
-    VkResult submit_result;
-    {
-      ui::vulkan::VulkanDevice::Queue::Acquisition queue_acquisition =
-          vulkan_device->AcquireQueue(vulkan_device->queue_family_graphics_compute(), 0);
-      submit_result = dfn.vkQueueSubmit(queue_acquisition.queue(), 1, &submit_info, fence);
-    }
-    if (submit_result != VK_SUCCESS) {
-      REXGPU_ERROR("Failed to submit a Vulkan command buffer");
-      if (submit_result == VK_ERROR_DEVICE_LOST && !device_lost_) {
-        device_lost_ = true;
-        if (graphics_system_) {
-          graphics_system_->OnHostGpuLossFromAnyThread(true);
-        }
+    // Replay + submit: on the FH2 submit worker, or here.
+    Fh2SubmitJob job;
+    job.command_buffer = command_buffer;
+    job.fence = fence;
+    job.wait_semaphores = current_submission_wait_semaphores_;
+    job.wait_stages = current_submission_wait_stage_masks_;
+    job.timestamp_slot = uint32_t(GetCurrentSubmission() % kFh2TimestampSlots) * 2;
+    job.submission = GetCurrentSubmission();
+    fh2_current_category_ = fh2::rtlog::GpuCategory::kOther;
+    bool fh2_async = fh2_submit_thread_.joinable() &&
+                     fh2::rtlog::TimedEnvInt("FH2_ASYNC_SUBMIT", 1) != 0;
+    if (fh2_async) {
+      std::unique_lock<std::mutex> lock(fh2_submit_mutex_);
+      if (!fh2_free_streams_.empty()) {
+        job.stream = std::move(fh2_free_streams_.back());
+        fh2_free_streams_.pop_back();
       }
+      lock.unlock();
+      deferred_command_buffer_.TakeStream(job.stream);
+      lock.lock();
+      fh2_submit_queue_.push_back(std::move(job));
+      lock.unlock();
+      fh2_submit_cv_.notify_one();
+    } else {
+      // Keep queue order with anything the worker still has.
+      Fh2WaitSubmitted(job.submission - 1);
+      deferred_command_buffer_.TakeStream(job.stream);
+      if (!Fh2SubmitJobNow(job)) {
+        return false;
+      }
+      fh2_submitted_.store(job.submission, std::memory_order_release);
+    }
+    if (fh2_submit_failed_.load(std::memory_order_acquire)) {
       return false;
     }
     uint64_t submission_current = GetCurrentSubmission();

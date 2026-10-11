@@ -29,7 +29,18 @@ class DeferredCommandBuffer {
                         size_t initial_size_bytes = 1024 * 1024);
 
   void Reset();
-  void Execute(VkCommandBuffer command_buffer);
+  void Execute(VkCommandBuffer command_buffer) {
+    ExecuteStream(command_stream_.data(), command_stream_.size(), command_buffer);
+  }
+  // Replays a recorded stream (any thread; reads only the device functions).
+  void ExecuteStream(const uintmax_t* stream, size_t stream_remaining,
+                     VkCommandBuffer command_buffer) const;
+  // Hands the recorded stream to the caller, continuing with `replacement`
+  // (cleared) -- for replaying it on another thread.
+  void TakeStream(std::vector<uintmax_t>& replacement) {
+    replacement.clear();
+    command_stream_.swap(replacement);
+  }
 
   // render_pass_begin->pNext of all barriers must be null.
   void CmdVkBeginRenderPass(const VkRenderPassBeginInfo* render_pass_begin,

@@ -18,6 +18,10 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -274,6 +278,35 @@ class VulkanCommandProcessor : public CommandProcessor {
     VkCommandPool pool;
     VkCommandBuffer buffer;
   };
+
+  // FH2 asynchronous submission: a worker thread replays each submission's
+  // recorded commands into its Vulkan command buffer and submits it, while
+  // the command thread goes on with the next one (replay + submit were ~13% of
+  // the command thread). Fences are only waited on once the worker has
+  // submitted them.
+  struct Fh2SubmitJob {
+    CommandBuffer command_buffer;
+    std::vector<uintmax_t> stream;
+    VkFence fence;
+    std::vector<VkSemaphore> wait_semaphores;
+    std::vector<VkPipelineStageFlags> wait_stages;
+    uint32_t timestamp_slot;
+    uint64_t submission;
+  };
+  void Fh2SubmitThreadMain();
+  bool Fh2SubmitJobNow(Fh2SubmitJob& job);
+  // Waits until the worker has submitted everything up to `submission`.
+  void Fh2WaitSubmitted(uint64_t submission);
+  void Fh2StopSubmitThread();
+  std::thread fh2_submit_thread_;
+  std::mutex fh2_submit_mutex_;
+  std::condition_variable fh2_submit_cv_;
+  std::condition_variable fh2_submitted_cv_;
+  std::deque<Fh2SubmitJob> fh2_submit_queue_;
+  std::vector<std::vector<uintmax_t>> fh2_free_streams_;
+  std::atomic<uint64_t> fh2_submitted_{0};
+  std::atomic<bool> fh2_submit_failed_{false};
+  bool fh2_submit_stop_ = false;
 
   struct SparseBufferBind {
     VkBuffer buffer;
