@@ -491,7 +491,11 @@ extern "C" REX_FUNC(sub_8255D2C0) {
 // Festival Leaderboard / Cloud Session offline handler
 // Live switch (debug channel: stub <addr> on|off) for the original port's
 // stubs, to test whether they hide real game logic.
-std::atomic<bool> g_stub_827DC190_on{true};
+// sub_827DC190 was stubbed (-1) as a "festival leaderboard / cloud session"
+// handler; it is part of the options menu: with it stubbed, changed options
+// never registered ("Custom" preset) and A closed the menu without saving.
+// Runs for real by default now (2026-10-11).
+std::atomic<bool> g_stub_827DC190_on{false};
 std::atomic<bool> g_stub_827E1558_on{true};
 extern "C" void __imp__sub_827DC190(PPCContext& ctx, uint8_t* base);
 extern "C" REX_FUNC(sub_827DC190) {
