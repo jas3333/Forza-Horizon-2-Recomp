@@ -3795,12 +3795,29 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   // (the z-buffer makes the order irrelevant), no stencil, no blending. Draws
   // that rely on depth already laid down (shadow projection / decals with
   // depth write off, EQUAL tests, stencil passes) must stay in strip order.
+  // Stencil is order-independent like depth when it only writes on depth pass
+  // (function "always", fail / depth-fail keep, pass keep or replace): each
+  // pixel ends with the reference of its closest surface.
   auto fh2_depth_control = draw_util::GetNormalizedDepthControl(regs);
+  auto fh2_stencil_order_independent = [&]() {
+    const auto& dc = fh2_depth_control;
+    if (!dc.stencil_enable) return true;
+    auto face_ok = [](xenos::CompareFunction func, xenos::StencilOp fail, xenos::StencilOp zfail,
+                      xenos::StencilOp zpass) {
+      return func == xenos::CompareFunction::kAlways && fail == xenos::StencilOp::kKeep &&
+             zfail == xenos::StencilOp::kKeep &&
+             (zpass == xenos::StencilOp::kKeep || zpass == xenos::StencilOp::kReplace);
+    };
+    return face_ok(dc.stencilfunc, dc.stencilfail, dc.stencilzfail, dc.stencilzpass) &&
+           (!dc.backface_enable ||
+            face_ok(dc.stencilfunc_bf, dc.stencilfail_bf, dc.stencilzfail_bf, dc.stencilzpass_bf));
+  };
   bool fh2_order_independent =
       fh2_depth_control.z_enable && fh2_depth_control.z_write_enable &&
       fh2_depth_control.zfunc != xenos::CompareFunction::kEqual &&
       fh2_depth_control.zfunc != xenos::CompareFunction::kNotEqual &&
-      !fh2_depth_control.stencil_enable && !Fh2DrawBlends();
+      fh2_depth_control.zfunc != xenos::CompareFunction::kAlways &&
+      fh2_stencil_order_independent() && !Fh2DrawBlends();
   if (fh2_bin_strip_ && render_target_cache_->Fh2FullFrameActive() && !memexport_used_vertex &&
       !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2) == 2 &&
       fh2_order_independent) {
