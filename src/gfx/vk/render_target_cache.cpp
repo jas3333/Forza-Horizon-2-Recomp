@@ -1478,6 +1478,16 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
               clear_vulkan_rt->Fh2ForgetProvenance();
             }
           }
+          if (fh2::rtlog::g_active) {
+            for (uint32_t i = 0; i < 2; ++i) {
+              for (const Transfer& transfer : clear_transfers_[i]) {
+                fh2::rtlog::Log("    PERFORMED (resolve clear) transfer into {}: {} tiles from {}",
+                                Fh2DescribeRT(clear_render_targets[i]),
+                                transfer.end_tiles - transfer.start_tiles,
+                                Fh2DescribeRT(transfer.source));
+              }
+            }
+          }
           PerformTransfersAndResolveClears(2, clear_render_targets, clear_transfers_, clear_values,
                                            &clear_rectangle);
         }
@@ -1648,6 +1658,16 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
           if (!transfers[i].empty() && depth_and_color_render_targets[i]) {
             static_cast<VulkanRenderTarget*>(depth_and_color_render_targets[i])
                 ->Fh2ForgetProvenance();
+          }
+        }
+      }
+      if (fh2::rtlog::g_active) {
+        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+          for (const Transfer& transfer : transfers[i]) {
+            fh2::rtlog::Log("    PERFORMED transfer into {}: {} tiles ({}-{}) from {}",
+                            Fh2DescribeRT(depth_and_color_render_targets[i]),
+                            transfer.end_tiles - transfer.start_tiles, transfer.start_tiles,
+                            transfer.end_tiles, Fh2DescribeRT(transfer.source));
           }
         }
       }
@@ -7103,6 +7123,11 @@ void VulkanRenderTargetCache::Fh2Materialize(VulkanRenderTarget* render_target,
                   transfers.size());
   if (transfers.empty()) {
     return;
+  }
+  for (const Transfer& transfer : transfers) {
+    fh2::rtlog::Log("    PERFORMED (materialize) transfer into {}: {} tiles ({}-{}) from {}",
+                    Fh2DescribeRT(render_target), transfer.end_tiles - transfer.start_tiles,
+                    transfer.start_tiles, transfer.end_tiles, Fh2DescribeRT(transfer.source));
   }
   RenderTarget* targets[1] = {render_target};
   PerformTransfersAndResolveClears(1, targets, &transfers);
