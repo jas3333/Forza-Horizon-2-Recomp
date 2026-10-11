@@ -6509,8 +6509,12 @@ bool VulkanRenderTargetCache::Fh2PrepareDirectResolve(const draw_util::ResolveIn
   uint32_t scale_x = draw_resolution_scale_x(), scale_y = draw_resolution_scale_y();
   bool scaled = scale_x > 1 || scale_y > 1;
   uint32_t dest_pitch = resolve_info.copy_dest_coordinate_info.pitch_aligned_div_32 * 32;
-  if (!texture_cache.Fh2FindResolveTarget(resolve_info.copy_dest_base, dest_pitch, dest_format,
-                                          scaled, out.target)) {
+  if (!texture_cache.Fh2FindResolveTarget(
+          resolve_info.copy_dest_base, dest_pitch, dest_format, scaled,
+          uint32_t(resolve_info.copy_dest_coordinate_info.offset_x_div_8) * 8,
+          uint32_t(resolve_info.copy_dest_coordinate_info.offset_y_div_8) * 8,
+          uint32_t(resolve_info.coordinate_info.width_div_8) * 8, resolve_info.height_div_8 * 8,
+          out.target)) {
     miss_reason = "no up-to-date target texture";
     return false;
   }

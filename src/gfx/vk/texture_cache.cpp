@@ -1243,7 +1243,10 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     counters.tex_load_bytes += size;
     counters.tex_loads_resolved += from_resolve;
     if (from_resolve && load_base && static_cast<VulkanTexture&>(texture).fh2_storage()) {
-      fh2_resolve_texture_keys_[key.base_page << 12] = key;
+      std::vector<TextureKey>& keys = fh2_resolve_texture_keys_[key.base_page << 12];
+      if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+        keys.push_back(key);
+      }
     }
     fh2::rtlog::Log("  texload {:08X} {}x{}x{} fmt {} {}{}{} len {:X}{}", address, key.GetWidth(),
                     key.GetHeight(), key.GetDepthOrArraySize(), uint32_t(key.format),
@@ -3420,42 +3423,53 @@ VkDescriptorSet VulkanTextureCache::VulkanTexture::Fh2GetStorageDescriptorSet() 
 
 bool VulkanTextureCache::Fh2FindResolveTarget(uint32_t dest_address, uint32_t dest_pitch_texels,
                                               xenos::TextureFormat format, bool scaled,
+                                              uint32_t offset_x, uint32_t offset_y,
+                                              uint32_t width, uint32_t height,
                                               Fh2ResolveTarget& out) {
   auto it = fh2_resolve_texture_keys_.upper_bound(dest_address);
   if (it == fh2_resolve_texture_keys_.begin()) {
     return false;
   }
   --it;
-  const TextureKey key = it->second;
-  if (key.format != format || bool(key.scaled_resolve) != scaled || key.pitch * 32 != dest_pitch_texels) {
-    return false;
-  }
-  auto* texture = static_cast<VulkanTexture*>(FindExistingTexture(key));
-  if (!texture || !texture->fh2_storage()) {
-    return false;
-  }
-  uint32_t base = key.base_page << 12;
-  if (dest_address >= base + texture->GetGuestBaseSize()) {
-    return false;
-  }
+  uint32_t base = it->first;
   // Tiled 32bpp: whole 32-row stripes are contiguous.
   uint32_t stripe_bytes = dest_pitch_texels * 32 * 4;
   uint32_t offset = dest_address - base;
   if (offset % stripe_bytes) {
     return false;
   }
-  {
-    auto global_lock = rex::thread::global_critical_region::AcquireDirect();
-    if (texture->base_outdated(global_lock)) {
-      return false;
+  uint32_t row_offset = offset / stripe_bytes * 32;
+  for (const TextureKey& key : it->second) {
+    if (key.format != format || bool(key.scaled_resolve) != scaled ||
+        key.pitch * 32 != dest_pitch_texels) {
+      continue;
+    }
+    auto* texture = static_cast<VulkanTexture*>(FindExistingTexture(key));
+    if (!texture || !texture->fh2_storage() ||
+        dest_address >= base + texture->GetGuestBaseSize()) {
+      continue;
+    }
+    bool covers_all = row_offset == 0 && offset_x == 0 && offset_y == 0 &&
+                      width >= key.GetWidth() && height >= key.GetHeight();
+    {
+      // Revalidation after the write also marks the mips up to date, so
+      // outdated mips must not be involved.
+      auto global_lock = rex::thread::global_critical_region::AcquireDirect();
+      if ((!covers_all && texture->base_outdated(global_lock)) ||
+          (texture->GetGuestMipsSize() && texture->mips_outdated(global_lock))) {
+        continue;
+      }
+    }
+    out.texture = texture;
+    out.x = 0;
+    out.y = row_offset;
+    out.width = key.GetWidth();
+    out.height = key.GetHeight();
+    if (texture->Fh2GetStorageDescriptorSet() != VK_NULL_HANDLE) {
+      return true;
     }
   }
-  out.texture = texture;
-  out.x = 0;
-  out.y = offset / stripe_bytes * 32;
-  out.width = key.GetWidth();
-  out.height = key.GetHeight();
-  return texture->Fh2GetStorageDescriptorSet() != VK_NULL_HANDLE;
+  return false;
 }
 
 void VulkanTextureCache::Fh2BeginResolveWrite(VulkanTexture& texture) {
