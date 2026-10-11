@@ -384,6 +384,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     // (depth always, constant depth, no stencil / color) with this host depth.
     bool fh2_dirty_by_clear = false;
     float fh2_clear_depth = 0.0f;
+    // The dirty rectangle is exactly what was written (only exact-rectangle
+    // clears wrote since the copy); otherwise it's a conservative estimate.
+    bool fh2_dirty_exact = false;
     // EDRAM tile ranges [first, second) on which the copy was made (only there
     // the contents are known to match the source's).
     std::vector<std::pair<uint32_t, uint32_t>> fh2_copied_ranges;
@@ -394,8 +397,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     // owns the tiles.
     bool fh2_virtual = false;
     std::vector<Transfer> fh2_deferred;
+    // exact: [x0, x1) x [y0, y1) is exactly the written area (a clear with a
+    // known rectangle) rather than a conservative estimate.
     void Fh2MarkWritten(uint32_t x0, uint32_t x1, uint32_t y0, uint32_t y1,
-                        const std::optional<float>& clear_depth = std::nullopt) {
+                        const std::optional<float>& clear_depth = std::nullopt,
+                        bool exact = false) {
       ++fh2_gen;
       if (y0 >= y1 || x0 >= x1) return;
       if (fh2_dirty_y0 >= fh2_dirty_y1) {
@@ -405,7 +411,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
         fh2_dirty_y1 = y1;
         fh2_dirty_by_clear = clear_depth.has_value();
         fh2_clear_depth = clear_depth.value_or(0.0f);
+        fh2_dirty_exact = exact;
       } else {
+        bool new_contains_old = x0 <= fh2_dirty_x0 && x1 >= fh2_dirty_x1 &&
+                                y0 <= fh2_dirty_y0 && y1 >= fh2_dirty_y1;
+        bool old_contains_new = fh2_dirty_x0 <= x0 && fh2_dirty_x1 >= x1 &&
+                                fh2_dirty_y0 <= y0 && fh2_dirty_y1 >= y1;
+        fh2_dirty_exact = fh2_dirty_exact && exact && (new_contains_old || old_contains_new);
         fh2_dirty_x0 = std::min(fh2_dirty_x0, x0);
         fh2_dirty_x1 = std::max(fh2_dirty_x1, x1);
         fh2_dirty_y0 = std::min(fh2_dirty_y0, y0);
@@ -423,6 +435,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       fh2_dirty_x0 = 0;
       fh2_dirty_x1 = kFh2AllRows;
       fh2_dirty_by_clear = false;
+      fh2_dirty_exact = false;
     }
 
    private:
@@ -1044,16 +1057,20 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Narrows the transfers into each bound render target to the rows the
   // source wrote since it was copied from that target (see
   // VulkanRenderTarget::fh2_copied_from_id), and updates provenance.
+  struct Fh2ClearInfo {
+    float host_depth;
+    uint32_t x0, y0, x1, y1;  // exact rectangle in render target pixels
+  };
   void Fh2NarrowTransfers(RenderTarget* const* render_targets, std::vector<Transfer>* transfers);
   void Fh2MarkDrawWritten(RenderTarget* const* render_targets,
-                          const std::optional<float>& clear_depth);
+                          const std::optional<Fh2ClearInfo>& clear);
   // FH2 clear draws: the host depth a draw writes if it's a clear (depth
   // always + write, no stencil, no color, constant depth from the vertex
   // shader run on the CPU).
-  std::optional<float> Fh2ClearDrawHostDepth(const Shader& vertex_shader,
-                                             reg::RB_DEPTHCONTROL normalized_depth_control,
-                                             uint32_t normalized_color_mask,
-                                             RenderTarget* depth_render_target);
+  std::optional<Fh2ClearInfo> Fh2ClearDrawHostDepth(const Shader& vertex_shader,
+                                                    reg::RB_DEPTHCONTROL normalized_depth_control,
+                                                    uint32_t normalized_color_mask,
+                                                    RenderTarget* depth_render_target);
   ShaderInterpreter fh2_interpreter_;
   // Depth-only clears replacing copy-backs of clear-only rows.
   struct Fh2PendingDepthClear {
@@ -1068,7 +1085,8 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   // Deferred transfers: skips copies into a depth target that the draw
   // doesn't read, materializing them only when something reads the target.
   void Fh2DeferAndMaterialize(RenderTarget* const* render_targets, std::vector<Transfer>* transfers,
-                              reg::RB_DEPTHCONTROL normalized_depth_control);
+                              reg::RB_DEPTHCONTROL normalized_depth_control,
+                              const std::optional<Fh2ClearInfo>& clear);
   void Fh2Materialize(VulkanRenderTarget* render_target, const char* reason);
   std::vector<Transfer> fh2_narrowed_transfers_[1 + xenos::kMaxColorRenderTargets];
   std::vector<VulkanTextureCache::Fh2ResolveTarget> fh2_resolve_targets_;
