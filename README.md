@@ -80,13 +80,16 @@ paths in `forzahorizon2_manifest.toml`; edit them if your game lives elsewhere.
 ```sh
 cmake --preset linux-amd64-release
 cmake --build --preset linux-amd64-release --target forzahorizon2_codegen
+cmake --preset linux-amd64-release    # again, so CMake picks up the generated code
 cmake --build --preset linux-amd64-release --target forzahorizon2 rexgpu-fh2
 ```
 
-The codegen step writes the recompiled sources to `generated/` (several hundred
-MB). The last step builds the game executable, the runtime and the renderer
-plugin into `out/build/linux-amd64-release/`. A full build takes a few minutes on
-a 16-core machine; after that, changes to the renderer rebuild in under a minute.
+The codegen step builds the recompiler and writes the recompiled sources to
+`generated/` (about 470 MB). Configure has to run again afterwards: it only adds
+the generated sources once they exist. The last step builds the game executable,
+the runtime and the renderer plugin into `out/build/linux-amd64-release/`. On a
+16-core machine a fresh clone takes about 5 minutes for codegen and 2 for the
+build; after that, renderer changes rebuild in under a minute.
 
 ## Play
 
