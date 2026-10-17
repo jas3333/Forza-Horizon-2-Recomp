@@ -170,13 +170,33 @@ switches to find which one is responsible, and press F11 when you see it.
 
 ## License
 
-The vendored SDK is BSD-3-Clause (`rexglue-sdk/LICENSE`); its license covers the
-SDK only. The original project did not include a license for its own files, so no
-license is granted here for the project code beyond what applies to the SDK.
+This repository combines code under different terms:
 
-This license situation does not grant any rights to Forza Horizon 2 or to anything
-generated from it. Do not redistribute game files, the generated code, or binaries
-built from them.
+- **This fork's own work is MIT-licensed** (see `LICENSE`): everything written by
+  jas3333 in this repository -- the Linux port, the game hooks and fixes, the
+  settings menu, the scripts, and all changes to the renderer and the SDK. Use it
+  however you like.
+- **`rexglue-sdk/`** is the ReXGlue SDK, BSD-3-Clause (`rexglue-sdk/LICENSE`),
+  with portions derived from Xenia (BSD). Modifications made here are also
+  available under MIT, but the SDK as a whole stays under its own license.
+- **`src/gfx/vk/`** began as a copy of the SDK's Xenia-derived Vulkan backend.
+  Files that carry a Xenia / ReXGlue copyright header keep that header and its
+  BSD terms for the original code; the changes made here are MIT.
+- **FábioAP's original files** came without a license, so they are not covered
+  by `LICENSE`: `src/forzahorizon2_hook_sub_823f4ee8.cpp`,
+  `src/forzahorizon2_hook_sub_823f8718.cpp`,
+  `src/forzahorizon2_hook_sub_824a6170.cpp`,
+  `src/forzahorizon2_hook_sub_82d881e8.cpp`, `src/diagnostics/heap_tracker.h`,
+  `src/main.cpp`, the PowerShell scripts in `tools/`, and the project setup files
+  (`CMakePresets.json`, `config*.toml`, `config/`, `vtables.toml`,
+  `forzahorizon2_manifest.toml`). `src/forzahorizon2_hooks.cpp`,
+  `src/forzahorizon2_app.h`, `CMakeLists.txt` and `config_default.toml` mix his
+  original lines with this fork's; only this fork's lines are MIT (`git blame`
+  shows which).
+
+None of this grants any rights to Forza Horizon 2 or to anything generated from
+it. Do not redistribute game files, the generated code, or binaries built from
+them.
 
 This project is not affiliated with or endorsed by Microsoft, Xbox, Playground
 Games, Turn 10 Studios, or the Forza franchise.
