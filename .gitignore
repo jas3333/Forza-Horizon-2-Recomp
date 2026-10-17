@@ -14,6 +14,10 @@
 /content/
 /user/
 
+# scripts/play.sh and scripts/test-run.sh data (saves, settings, logs).
+/play/
+/testrun/
+
 # Backup files left by manual edits during debugging sessions.
 *.bak
 *.bak_*
@@ -29,4 +33,8 @@
 *.xbe
 *.iso
 *.xiso
-/generated/
+# Recompiled code is generated locally from your own game files and must never
+# be committed. rexglue.cmake is build boilerplate (no game data) that the
+# top-level CMakeLists.txt includes before codegen has run.
+/generated/*
+!/generated/rexglue.cmake
