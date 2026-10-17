@@ -14,6 +14,7 @@
 #include <memory>
 
 #include "forzahorizon2_init.h"
+#include "forzahorizon2_settings.h"
 
 // Defined in forzahorizon2_hooks.cpp.
 void InstallGuestPageFaultRecovery();
@@ -90,6 +91,9 @@ class Forzahorizon2App : public rex::ReXApp {
     // writable cache:\ mounting, and STFS ContentManager save handling for these paths.
     paths.user_data_root = cwd / "user";
     paths.cache_root     = cwd / "cache";
+    // Settings live with the saves, not next to the executable (rebuilt).
+    paths.config_path    = cwd / "forzahorizon2.toml";
+    config_path_ = paths.config_path;
 
     // Remembered so OnPreLaunchModule() can pre-mount the save package at the
     // exact same root ContentManager resolves against.
@@ -113,9 +117,14 @@ class Forzahorizon2App : public rex::ReXApp {
   }
 
   // OnPreLaunchModule - register function hooks and extra symbolic aliases
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    InstallFh2Settings(drawer, window(), config_path_);
+  }
+
   void OnPreLaunchModule() override {
     InstallGuestPageFaultRecovery();
     InstallFh2DebugTools();
+    ApplyFh2SettingsAtStartup();
 
     auto* ks = rex::system::kernel_state();
     if (ks && ks->file_system()) {
@@ -203,4 +212,5 @@ class Forzahorizon2App : public rex::ReXApp {
 
  private:
   std::filesystem::path user_data_root_;
+  std::filesystem::path config_path_;
 };

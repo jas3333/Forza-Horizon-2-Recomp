@@ -203,6 +203,30 @@ void DeferredCommandBuffer::ExecuteStream(const uintmax_t* stream, size_t stream
         dfn.vkCmdWriteTimestamp(command_buffer, args.pipeline_stage, args.query_pool, args.query);
       } break;
 
+      case Command::kFh2UpdateUniformBuffers: {
+        auto& args = *reinterpret_cast<const ArgsFh2UpdateUniformBuffers*>(stream);
+        const auto* buffer_infos = reinterpret_cast<const VkDescriptorBufferInfo*>(
+            reinterpret_cast<const uint8_t*>(stream) +
+            rex::align(sizeof(ArgsFh2UpdateUniformBuffers), alignof(VkDescriptorBufferInfo)));
+        VkWriteDescriptorSet writes[8];
+        uint32_t count = std::min(args.count, uint32_t(std::size(writes)));
+        for (uint32_t i = 0; i < count; ++i) {
+          VkWriteDescriptorSet& write = writes[i];
+          write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+          write.pNext = nullptr;
+          write.dstSet = args.set;
+          write.dstBinding = i;
+          write.dstArrayElement = 0;
+          write.descriptorCount = 1;
+          write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+          write.pImageInfo = nullptr;
+          write.pBufferInfo = &buffer_infos[i];
+          write.pTexelBufferView = nullptr;
+        }
+        dfn.vkUpdateDescriptorSets(command_processor_.GetVulkanDevice()->device(), count, writes,
+                                   0, nullptr);
+      } break;
+
       case Command::kVkBeginRendering: {
         auto& args = *reinterpret_cast<const ArgsVkBeginRendering*>(stream);
         size_t offset_bytes =

@@ -12,6 +12,8 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <atomic>
+
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/logging.h>
 #include <rex/hook.h>
@@ -118,7 +120,16 @@ REX_EXPORT_STUB(__imp__NomnilGetExtension);
 REX_EXPORT_STUB(__imp__NomnilSetLed);
 REX_EXPORT_STUB(__imp__NomnilStartCloseDevice);
 REX_EXPORT_STUB(__imp__NullCableRequest);
-REX_EXPORT_STUB(__imp__PsCamDeviceRequest);
+// Kinect camera requests: FH2 polls ~35 times a second. Logged once.
+extern "C" REX_FUNC(__imp__PsCamDeviceRequest) {
+  (void)base;
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true, std::memory_order_relaxed)) {
+    REXKRNL_WARN("__imp__PsCamDeviceRequest STUB (further calls not logged)");
+  }
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__PsCamDeviceRequest(
+    "__imp__PsCamDeviceRequest", &__imp__PsCamDeviceRequest);
 REX_EXPORT_STUB(__imp__RmcDeviceRequest);
 REX_EXPORT_STUB(__imp__TidDeviceRequest);
 REX_EXPORT_STUB(__imp__TitleDeviceAuthRequest);

@@ -397,6 +397,10 @@ class VulkanPipelineCache {
 
   // Ucode hash -> shader.
   std::unordered_map<uint64_t, VulkanShader*, rex::IdentityHasher<uint64_t>> shaders_;
+  // FH2: direct-mapped memo in front of shaders_ (the game rebinds shaders
+  // constantly; the unordered_map lookup was ~2% of the draw thread). Shaders
+  // are only freed at shutdown, which clears it too.
+  std::pair<uint64_t, VulkanShader*> fh2_shader_lookup_[1024] = {};
 
   // Geometry shaders for Xenos primitive types not supported by Vulkan.
   // Stores VK_NULL_HANDLE if failed to create.

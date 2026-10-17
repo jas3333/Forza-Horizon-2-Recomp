@@ -97,6 +97,24 @@ class DeferredCommandBuffer {
     }
   }
 
+  // FH2: writes uniform buffer descriptors (bindings 0..count-1) of a freshly
+  // allocated set when the stream is replayed (on the submission thread with
+  // asynchronous submission) instead of on the draw thread. Valid because the
+  // set is used only by commands later in this stream.
+  void Fh2UpdateUniformBufferDescriptors(VkDescriptorSet set, uint32_t count,
+                                         const VkDescriptorBufferInfo* buffer_infos) {
+    size_t arguments_size =
+        rex::align(sizeof(ArgsFh2UpdateUniformBuffers), alignof(VkDescriptorBufferInfo));
+    size_t infos_offset = arguments_size;
+    arguments_size += sizeof(VkDescriptorBufferInfo) * count;
+    uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+        WriteCommand(Command::kFh2UpdateUniformBuffers, arguments_size));
+    auto& args = *reinterpret_cast<ArgsFh2UpdateUniformBuffers*>(args_ptr);
+    args.set = set;
+    args.count = count;
+    std::memcpy(args_ptr + infos_offset, buffer_infos, sizeof(VkDescriptorBufferInfo) * count);
+  }
+
   void CmdVkBindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, VkIndexType index_type) {
     auto& args = *reinterpret_cast<ArgsVkBindIndexBuffer*>(
         WriteCommand(Command::kVkBindIndexBuffer, sizeof(ArgsVkBindIndexBuffer)));
@@ -418,6 +436,7 @@ class DeferredCommandBuffer {
     kVkSetStencilWriteMask,
     kVkSetViewport,
     kVkWriteTimestamp,
+    kFh2UpdateUniformBuffers,
   };
 
   struct CommandHeader {
@@ -466,6 +485,13 @@ class DeferredCommandBuffer {
     uint32_t dynamic_offset_count;
     // Followed by aligned VkDescriptorSet[], optional uint32_t[].
     static_assert(alignof(VkDescriptorSet) <= alignof(uintmax_t));
+  };
+
+  struct ArgsFh2UpdateUniformBuffers {
+    VkDescriptorSet set;
+    uint32_t count;
+    // Followed by aligned VkDescriptorBufferInfo[].
+    static_assert(alignof(VkDescriptorBufferInfo) <= alignof(uintmax_t));
   };
 
   struct ArgsVkBindIndexBuffer {

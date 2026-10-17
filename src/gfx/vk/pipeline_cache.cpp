@@ -873,6 +873,8 @@ void VulkanPipelineCache::Shutdown() {
     delete it.second;
   }
   shaders_.clear();
+  std::fill(std::begin(fh2_shader_lookup_), std::end(fh2_shader_lookup_),
+            std::pair<uint64_t, VulkanShader*>{});
   shader_storage_index_ = 0;
   texture_binding_layout_map_.clear();
   texture_binding_layouts_.clear();
@@ -891,9 +893,15 @@ VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
 VulkanShader* VulkanPipelineCache::LoadShader(xenos::ShaderType shader_type,
                                               const uint32_t* host_address, uint32_t dword_count,
                                               uint64_t data_hash) {
+  std::pair<uint64_t, VulkanShader*>& memo =
+      fh2_shader_lookup_[(data_hash ^ (data_hash >> 32)) % std::size(fh2_shader_lookup_)];
+  if (memo.second && memo.first == data_hash) {
+    return memo.second;
+  }
   auto it = shaders_.find(data_hash);
   if (it != shaders_.end()) {
     // Shader has been previously loaded.
+    memo = {data_hash, it->second};
     return it->second;
   }
   // Always create the shader and stash it away.

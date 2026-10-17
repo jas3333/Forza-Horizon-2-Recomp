@@ -1003,6 +1003,9 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
 
   Fh2ShutdownDirectResolve();
   Fh2FullFrameDestroyImages();
+  for (Fh2FullFrameImageSet& set : fh2_ff_cache_) {
+    Fh2FullFrameDestroyImageSet(set);
+  }
 
   // Destroy all render targets before the descriptor set pool is destroyed -
   // may happen if shutting down the VulkanRenderTargetCache by destroying it,
@@ -1736,7 +1739,13 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
             }
             bool keep = transfer_mode == fh2::rtlog::TransferMode::kSameFormat &&
                         (same_format || keeps_old || (keep_classes & cls));
-            if (keep) fh2_filtered_transfers_[i].push_back(transfer);
+            if (keep) {
+              fh2_filtered_transfers_[i].push_back(transfer);
+            } else if (fh2::rtlog::g_active) {
+              fh2::rtlog::Log("    DROPPED transfer into slot {}: tiles {}-{} from {} (class {})",
+                              i, transfer.start_tiles, transfer.end_tiles,
+                              Fh2DescribeRT(transfer.source), cls);
+            }
           }
         }
         transfers = fh2_filtered_transfers_;
@@ -7703,19 +7712,74 @@ void VulkanRenderTargetCache::Fh2FullFrameDestroyImages() {
   fh2_ff_.active = false;
 }
 
-bool VulkanRenderTargetCache::Fh2FullFrameEnsureImages() {
-  bool same = fh2_ff_.images[0] && fh2_ff_.image_width == fh2_ff_.width &&
-              fh2_ff_.image_height == fh2_ff_.height;
+void VulkanRenderTargetCache::Fh2FullFrameSwapImages(Fh2FullFrameImageSet& set) {
   for (uint32_t i = 0; i < 2; ++i) {
-    same &= fh2_ff_.image_keys[i] == fh2_ff_.keys[i];
+    std::swap(fh2_ff_.images[i], set.images[i]);
+    std::swap(fh2_ff_.memory[i], set.memory[i]);
+    std::swap(fh2_ff_.views[i], set.views[i]);
+    std::swap(fh2_ff_.sample_views[i], set.sample_views[i]);
+    std::swap(fh2_ff_.descriptor_indices[i], set.descriptor_indices[i]);
+    std::swap(fh2_ff_.image_keys[i], set.image_keys[i]);
   }
-  if (same) {
+  std::swap(fh2_ff_.stencil_view, set.stencil_view);
+  std::swap(fh2_ff_.image_width, set.image_width);
+  std::swap(fh2_ff_.image_height, set.image_height);
+}
+
+void VulkanRenderTargetCache::Fh2FullFrameDestroyImageSet(Fh2FullFrameImageSet& set) {
+  bool active = fh2_ff_.active;
+  Fh2FullFrameSwapImages(set);
+  Fh2FullFrameDestroyImages();
+  Fh2FullFrameSwapImages(set);
+  fh2_ff_.active = active;
+}
+
+bool VulkanRenderTargetCache::Fh2FullFrameEnsureImages() {
+  auto matches = [this](const VkImage image, uint32_t width, uint32_t height,
+                        const uint32_t* image_keys) {
+    return image && width == fh2_ff_.width && height == fh2_ff_.height &&
+           image_keys[0] == fh2_ff_.keys[0] && image_keys[1] == fh2_ff_.keys[1];
+  };
+  if (matches(fh2_ff_.images[0], fh2_ff_.image_width, fh2_ff_.image_height,
+              fh2_ff_.image_keys)) {
     return true;
   }
-  // Destroying images still referenced by queued work: wait for the GPU (only
-  // when the configuration changes).
-  command_processor_.Fh2AwaitIdle();
-  Fh2FullFrameDestroyImages();
+  auto set_extent = [this]() {
+    fh2_ff_.framebuffer.framebuffer = VK_NULL_HANDLE;
+    fh2_ff_.framebuffer.host_extent = {fh2_ff_.width * draw_resolution_scale_x(),
+                                       fh2_ff_.height * draw_resolution_scale_y()};
+  };
+  // Images for this configuration from earlier: swap them in (the current
+  // ones take their cache slot). Nothing is destroyed, so no GPU wait.
+  for (Fh2FullFrameImageSet& set : fh2_ff_cache_) {
+    if (matches(set.images[0], set.image_width, set.image_height, set.image_keys)) {
+      Fh2FullFrameSwapImages(set);
+      set.last_used = ++fh2_ff_use_counter_;
+      set_extent();
+      return true;
+    }
+  }
+  // Keep the current images in a free slot, or in place of the least recently
+  // used set -- destroying that one (still referenced by queued work) is the
+  // only case that waits for the GPU.
+  if (fh2_ff_.images[0]) {
+    Fh2FullFrameImageSet* slot = &fh2_ff_cache_[0];
+    for (Fh2FullFrameImageSet& set : fh2_ff_cache_) {
+      if (!set.images[0]) {
+        slot = &set;
+        break;
+      }
+      if (set.last_used < slot->last_used) {
+        slot = &set;
+      }
+    }
+    if (slot->images[0]) {
+      command_processor_.Fh2AwaitIdle();
+      Fh2FullFrameDestroyImageSet(*slot);
+    }
+    Fh2FullFrameSwapImages(*slot);
+    slot->last_used = ++fh2_ff_use_counter_;
+  }
   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();

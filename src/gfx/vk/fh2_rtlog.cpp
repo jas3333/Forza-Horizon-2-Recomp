@@ -229,9 +229,12 @@ TransferMode CurrentTransferMode() {
   // game clears after such rebinds), but its 4x-MSAA fast clears reach the 1x
   // targets through same-format transfers -- dropping those breaks shadows.
   TransferMode mode = TransferMode::kSameFormat;
-  double seconds = SecondsSinceStart();
-  for (const TransferModeStep& step : g_transfer_steps) {
-    if (seconds >= step.from_seconds) mode = step.mode;
+  // Called per draw: read the clock only for an FH2_TRANSFER_MODES schedule.
+  if (!g_transfer_steps.empty()) {
+    double seconds = SecondsSinceStart();
+    for (const TransferModeStep& step : g_transfer_steps) {
+      if (seconds >= step.from_seconds) mode = step.mode;
+    }
   }
   // Live override (debug channel: env FH2_TRANSFER_ALL 1).
   if (TimedEnvInt("FH2_TRANSFER_ALL", 0) == 1) mode = TransferMode::kAll;
@@ -455,6 +458,12 @@ void OnSwap() {
         per(c.transfers_materialized, l.transfers_materialized),
         per(c.transfers_cleared, l.transfers_cleared), per(c.draws_deduped, l.draws_deduped),
         per(c.vfetch_requests_skipped, l.vfetch_requests_skipped));
+    {
+      double draws = double(c.draws - l.draws);
+      double busy_ns = double(c.draw_thread_busy_ns - l.draw_thread_busy_ns);
+      REXGPU_INFO("[DRAWTHREAD] busy {:.2f} ms per frame, {:.3f} us per draw",
+                  busy_ns / kStatFrames / 1e6, draws ? busy_ns / draws / 1e3 : 0.0);
+    }
     std::string breakdown;
     for (uint32_t i = 0; i < uint32_t(GpuCategory::kCount); ++i) {
       double ms = per(c.gpu_category_ns[i], l.gpu_category_ns[i]) / 1e6;

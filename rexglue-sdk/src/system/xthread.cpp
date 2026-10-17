@@ -34,6 +34,9 @@
 #include <rex/system/checkpoint.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/guest_exception_report.h>
+#if !REX_PLATFORM_WIN32
+#include <cxxabi.h>
+#endif
 #include <rex/system/thread_state.h>
 #include <rex/system/user_module.h>
 #include <rex/kernel/xboxkrnl/threading.h>
@@ -680,6 +683,12 @@ X_STATUS XThread::Create() {
     running_ = true;
     try {
       Execute();
+#if !REX_PLATFORM_WIN32
+    } catch (abi::__forced_unwind&) {
+      // pthread_exit() from XThread::Exit unwinds with this: a normal thread
+      // exit, not an exception -- must be rethrown, and isn't reported.
+      throw;
+#endif
     } catch (const std::exception& error) {
       const auto report = MakeGuestExceptionReport(
           thread_state_ ? thread_state_->context() : nullptr, thread_id_,

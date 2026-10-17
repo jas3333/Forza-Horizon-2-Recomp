@@ -36,6 +36,8 @@ inline const char* GpuCategoryName(GpuCategory category) {
 
 struct Counters {
   uint64_t draws = 0;
+  // Time the renderer's draw thread spent executing queued work (not waiting).
+  uint64_t draw_thread_busy_ns = 0;
   uint64_t rt_changes = 0;       // render target set changes (render pass breaks)
   uint64_t transfers = 0;        // EDRAM ownership transfers
   uint64_t transfer_rts = 0;     // destination render targets with transfers

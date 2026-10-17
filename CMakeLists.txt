@@ -19,6 +19,7 @@ set(FORZAHORIZON2_SOURCES
     src/forzahorizon2_hook_sub_824a6170.cpp
     src/forzahorizon2_hook_sub_823f8718.cpp
     src/forzahorizon2_d3d_probe.cpp
+    src/forzahorizon2_settings.cpp
 )
 
 if(WIN32)
@@ -111,7 +112,7 @@ if(NOT WIN32)
         ${_rex_gfx}
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk/thirdparty/renderdoc
         ${CMAKE_CURRENT_SOURCE_DIR}/rexglue-sdk)
-    target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
+    target_compile_options(rexgpu-fh2 PRIVATE -Wno-unused-variable -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -g)
     target_link_options(rexgpu-fh2 PRIVATE -Wl,--no-undefined)
     # The command thread (PM4 parsing, register file, render target / texture
     # caches -- all compiled into this library) is the bottleneck in busy

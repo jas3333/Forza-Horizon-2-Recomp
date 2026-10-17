@@ -1056,6 +1056,26 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   uint32_t fh2_full_frame_strip_y_ = 0;
  private:
   Fh2FullFrame fh2_ff_;
+  // Image sets of earlier full-frame configurations. FH2 alternates between a
+  // few (same size, different formats) within a frame; switching back swaps a
+  // cached set in instead of idling the GPU and reallocating 3x-scaled images.
+  struct Fh2FullFrameImageSet {
+    VkImage images[2] = {};
+    VkDeviceMemory memory[2] = {};
+    VkImageView views[2] = {};
+    VkImageView sample_views[2] = {};
+    VkImageView stencil_view = VK_NULL_HANDLE;
+    size_t descriptor_indices[2] = {SIZE_MAX, SIZE_MAX};
+    uint32_t image_keys[2] = {};
+    uint32_t image_width = 0, image_height = 0;
+    uint64_t last_used = 0;
+  };
+  static constexpr size_t kFh2FullFrameCachedSets = 3;
+  Fh2FullFrameImageSet fh2_ff_cache_[kFh2FullFrameCachedSets];
+  uint64_t fh2_ff_use_counter_ = 0;
+  // Exchanges the current images (fh2_ff_) with a cached set.
+  void Fh2FullFrameSwapImages(Fh2FullFrameImageSet& set);
+  void Fh2FullFrameDestroyImageSet(Fh2FullFrameImageSet& set);
   bool Fh2FullFrameEnsureImages();
   void Fh2FullFrameSetStripArea(uint32_t strip_y);
   void Fh2FullFrameDestroyImages();

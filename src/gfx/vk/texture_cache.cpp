@@ -676,6 +676,35 @@ VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(uint32_t fetch_c
 
 VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
     const VulkanShader::SamplerBinding& binding) const {
+  const uint32_t* fetch =
+      &register_file().values[XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0 + binding.fetch_constant * 6];
+  int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
+  uint64_t hash = uint64_t(reinterpret_cast<uintptr_t>(&binding)) * 0x9E3779B97F4A7C15ull;
+  for (uint32_t i = 0; i < 6; ++i) {
+    hash = (hash ^ fetch[i]) * 0x100000001B3ull;
+  }
+  Fh2SamplerMemoEntry& entry = fh2_sampler_memo_[(hash >> 32) % std::size(fh2_sampler_memo_)];
+  const VulkanShader::SamplerBinding& copy = entry.binding_copy;
+  if (!fh2::rtlog::TimedEnvInt("FH2_SAMPLER_MEMO", 1)) {
+    return ComputeSamplerParameters(binding);
+  }
+  if (entry.binding == &binding && entry.anisotropic_override == anisotropic_override &&
+      !std::memcmp(entry.fetch, fetch, sizeof(entry.fetch)) &&
+      copy.fetch_constant == binding.fetch_constant && copy.mag_filter == binding.mag_filter &&
+      copy.min_filter == binding.min_filter && copy.mip_filter == binding.mip_filter &&
+      copy.aniso_filter == binding.aniso_filter) {
+    return entry.parameters;
+  }
+  entry.binding = &binding;
+  entry.binding_copy = binding;
+  std::memcpy(entry.fetch, fetch, sizeof(entry.fetch));
+  entry.anisotropic_override = anisotropic_override;
+  entry.parameters = ComputeSamplerParameters(binding);
+  return entry.parameters;
+}
+
+VulkanTextureCache::SamplerParameters VulkanTextureCache::ComputeSamplerParameters(
+    const VulkanShader::SamplerBinding& binding) const {
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(binding.fetch_constant);
 

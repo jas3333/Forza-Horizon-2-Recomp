@@ -315,7 +315,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Parser side: run inline, or reserve queue space (nullptr = run inline).
   bool Fh2Inline() const { return !fh2_split_threaded_ || fh2_in_ordered_; }
   uint8_t* Fh2Reserve(uint32_t size);
-  void Fh2Publish(uint32_t size);
+  // Commits a reserved op. Register / shader / trace ops are batched and made
+  // visible to the draw thread by Fh2Flush (draws, drains, every 16 KB): one
+  // shared-cache-line store per batch instead of a locked add per register.
+  void Fh2Publish(uint32_t size, bool flush = false);
+  void Fh2Flush();
   void Fh2Drain();
   void Fh2DrawThreadMain();
   void Fh2ExecuteOp(const Fh2OpHeader* op);
@@ -338,6 +342,9 @@ class VulkanCommandProcessor : public CommandProcessor {
   uint64_t fh2_ordered_counts_[129] = {};  // per opcode (128 = CallInThread)
   uint32_t fh2_ordered_report_frames_ = 0;
   std::vector<uint8_t> fh2_queue_;
+  // Parser-only: bytes written (published or not), and the last tail seen.
+  uint64_t fh2_queue_write_ = 0;
+  uint64_t fh2_queue_cached_tail_ = 0;
   alignas(64) std::atomic<uint64_t> fh2_queue_head_{0};  // bytes published
   alignas(64) std::atomic<uint64_t> fh2_queue_tail_{0};  // bytes executed
   alignas(64) std::atomic<uint32_t> fh2_draw_sleeping_{0};
@@ -612,6 +619,16 @@ class VulkanCommandProcessor : public CommandProcessor {
   // Returns how many VkWriteDescriptorSet structure instances have been
   // written, or 0 if there was a failure to allocate the descriptor set or no
   // bindings were requested.
+  // Last texture descriptor set written per stage ([0] vertex, [1] pixel)
+  // with its contents (texture image infos, then sampler image infos).
+  struct Fh2TextureSetCache {
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint64_t frame = 0;
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    uint32_t texture_count = 0;
+    std::vector<VkDescriptorImageInfo> infos;
+  };
+  Fh2TextureSetCache fh2_texture_set_cache_[2];
   uint32_t WriteTransientTextureBindings(bool is_vertex, uint32_t texture_count,
                                          uint32_t sampler_count,
                                          VkDescriptorSetLayout descriptor_set_layout,

@@ -731,12 +731,25 @@ uint32_t CommandProcessor::ExecutePrimaryBuffer(uint32_t read_index, uint32_t wr
   memory::RingBuffer reader(memory_->TranslatePhysical(primary_buffer_ptr_), primary_buffer_size_);
   reader.set_read_offset(read_index * sizeof(uint32_t));
   reader.set_write_offset(write_index * sizeof(uint32_t));
+  // The read pointer is written back after every packet, not only once the
+  // whole span is done: a span can hold thousands of draws, and a title that
+  // fills the ring would otherwise wait for all of them before writing more,
+  // leaving the command processor idle afterwards (the two take turns instead
+  // of overlapping). Packet contents are consumed once executed.
+  uint32_t* read_ptr_writeback =
+      read_ptr_writeback_ptr_
+          ? reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(read_ptr_writeback_ptr_))
+          : nullptr;
   do {
     if (!ExecutePacket(&reader)) {
       // This probably should be fatal - but we're going to continue anyways.
       REXGPU_ERROR("**** PRIMARY RINGBUFFER: Failed to execute packet.");
       assert_always();
       break;
+    }
+    if (read_ptr_writeback) {
+      memory::store_and_swap<uint32_t>(read_ptr_writeback,
+                                       uint32_t(reader.read_offset() / sizeof(uint32_t)));
     }
   } while (reader.read_count());
 
@@ -1837,11 +1850,11 @@ bool CommandProcessor::ExecutePacketType3_VIZ_QUERY(memory::RingBuffer* reader, 
     // On hardware this clears the internal state of the scan converter (which
     // is different to the register)
     WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, VIZQUERY_START);
-    REXGPU_INFO("Begin viz query ID {:02X}", id);
+    REXGPU_DEBUG("Begin viz query ID {:02X}", id);
   } else {
     // end the viz query
     WriteRegister(XE_GPU_REG_VGT_EVENT_INITIATOR, VIZQUERY_END);
-    REXGPU_INFO("End viz query ID {:02X}", id);
+    REXGPU_DEBUG("End viz query ID {:02X}", id);
     // The scan converter writes the internal result back to the register here.
     // We just fake it and say it was visible in case it is read back.
     if (id < 32) {

@@ -92,6 +92,18 @@ class VulkanTextureCache final : public TextureCache {
                                               xenos::FetchOpDimension dimension, bool is_signed);
 
   SamplerParameters GetSamplerParameters(const VulkanShader::SamplerBinding& binding) const;
+  // FH2: memo of GetSamplerParameters (a pure function of the binding, the
+  // fetch constant and anisotropic_override) -- recomputed for every sampler
+  // of every draw otherwise.
+  struct Fh2SamplerMemoEntry {
+    const VulkanShader::SamplerBinding* binding = nullptr;
+    VulkanShader::SamplerBinding binding_copy = {};
+    uint32_t fetch[6] = {};
+    int32_t anisotropic_override = 0;
+    SamplerParameters parameters;
+  };
+  mutable Fh2SamplerMemoEntry fh2_sampler_memo_[128];
+  SamplerParameters ComputeSamplerParameters(const VulkanShader::SamplerBinding& binding) const;
 
   // Must be called for every used sampler at least once in a single submission,
   // and a submission must be open for this to be callable.

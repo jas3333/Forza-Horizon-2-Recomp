@@ -3883,9 +3883,26 @@ bool VulkanCommandProcessor::IssueDrawImpl(xenos::PrimitiveType prim_type, uint3
       fh2_depth_control.zfunc != xenos::CompareFunction::kNotEqual &&
       fh2_depth_control.zfunc != xenos::CompareFunction::kAlways &&
       fh2_stencil_order_independent() && !Fh2DrawBlends();
+  // Depth-only draws that override depth (test always / equal / not equal,
+  // depth writes, no color): FH2 draws one in every strip of the main pass
+  // between the sky and the world -- in the in-car view it masks the cockpit.
+  // Dedup draws the world over the whole frame during the first strip, so it
+  // must draw this mask over the whole frame there too (in its place, before
+  // the world) and skip it in later strips: drawn per strip, the later
+  // strips reset the depth under the world drawn earlier, and what followed
+  // (foliage, other cars' glass) drew over the cars -- other cars' windows
+  // and bodies showing the scenery behind them in the in-car view.
+  bool fh2_depth_mask_draw =
+      fh2_depth_control.z_enable && fh2_depth_control.z_write_enable &&
+      (fh2_depth_control.zfunc == xenos::CompareFunction::kAlways ||
+       fh2_depth_control.zfunc == xenos::CompareFunction::kEqual ||
+       fh2_depth_control.zfunc == xenos::CompareFunction::kNotEqual) &&
+      !draw_util::GetNormalizedColorMask(regs,
+                                         pixel_shader ? pixel_shader->writes_color_targets() : 0) &&
+      fh2::rtlog::TimedEnvInt("FH2_DEDUP_DEPTH_MASKS", 1) != 0;
   if (fh2_bin_strip_ && render_target_cache_->Fh2FullFrameActive() && !memexport_used_vertex &&
       !memexport_used_pixel && fh2::rtlog::TimedEnvInt("FH2_FULL_FRAME_STRIPS", 2) == 2 &&
-      fh2_order_independent) {
+      (fh2_order_independent || fh2_depth_mask_draw)) {
     if (fh2_full_frame_pass_ != fh2::rtlog::g_counters.full_frame_passes) {
       fh2_full_frame_pass_ = fh2::rtlog::g_counters.full_frame_passes;
       fh2_full_frame_drawn_.clear();
@@ -7022,6 +7039,27 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   }
 }
 
+namespace {
+// Copies the float constants selected by a 256-bit map (4 x 64) into the
+// buffer, packed: each run of consecutive constants in one copy (shaders
+// mostly use contiguous ranges) instead of 16 bytes per set bit.
+uint8_t* Fh2CopyFloatConstants(uint8_t* mapping, const uint64_t* map, const uint32_t* constants) {
+  for (uint32_t i = 0; i < 4; ++i) {
+    uint64_t bits = map[i];
+    while (bits) {
+      uint32_t first = uint32_t(__builtin_ctzll(bits));
+      uint64_t shifted = bits >> first;
+      uint32_t run = ~shifted ? uint32_t(__builtin_ctzll(~shifted)) : 64 - first;
+      size_t bytes = size_t(run) * sizeof(float) * 4;
+      std::memcpy(mapping, constants + (i * 64 + first) * 4, bytes);
+      mapping += bytes;
+      bits = run + first >= 64 ? 0 : bits & ~((uint64_t(2) << (first + run - 1)) - 1);
+    }
+  }
+  return mapping;
+}
+}  // namespace
+
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                                             const VulkanShader* pixel_shader) {
   SCOPE_profile_zone("gpu:bindings");
@@ -7122,18 +7160,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry = current_float_constant_map_vertex_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
-        }
-      }
+      mapping = Fh2CopyFloatConstants(mapping, current_float_constant_map_vertex_,
+                                      &regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X]);
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFloatVertex;
     }
@@ -7151,18 +7179,8 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry = current_float_constant_map_pixel_[i];
-        uint32_t float_constant_index;
-        while (rex::bit_scan_forward(float_constant_map_entry, &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(
-              mapping,
-              &regs[XE_GPU_REG_SHADER_CONSTANT_256_X + (i << 8) + (float_constant_index << 2)],
-              sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
-        }
-      }
+      mapping = Fh2CopyFloatConstants(mapping, current_float_constant_map_pixel_,
+                                      &regs.values[XE_GPU_REG_SHADER_CONSTANT_256_X]);
       current_constant_buffers_up_to_date_ |= UINT32_C(1)
                                               << SpirvShaderTranslator::kConstantBufferFloatPixel;
     }
@@ -7288,6 +7306,63 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
 
+  // FH2: reuse the texture descriptor set written for an earlier draw of this
+  // frame when the images and samplers are the same (consecutive draws of one
+  // car, track pieces sharing a material) -- allocating and writing a set per
+  // draw was most of this function. Only within the frame: transient sets are
+  // recycled once their frame completes. Still rebound below like a new set.
+  auto fh2_reuse_texture_set = [&](uint32_t stage, VkDescriptorSetLayout layout,
+                                   size_t texture_offset, uint32_t texture_count,
+                                   size_t sampler_offset, uint32_t sampler_count) -> bool {
+    Fh2TextureSetCache& cache = fh2_texture_set_cache_[stage];
+    if (cache.set == VK_NULL_HANDLE || cache.frame != frame_current_ || cache.layout != layout ||
+        cache.texture_count != texture_count ||
+        cache.infos.size() != size_t(texture_count) + sampler_count ||
+        std::memcmp(cache.infos.data(), descriptor_write_image_info_.data() + texture_offset,
+                    sizeof(VkDescriptorImageInfo) * texture_count) ||
+        std::memcmp(cache.infos.data() + texture_count,
+                    descriptor_write_image_info_.data() + sampler_offset,
+                    sizeof(VkDescriptorImageInfo) * sampler_count)) {
+      return false;
+    }
+    uint32_t set_index = stage ? SpirvShaderTranslator::kDescriptorSetTexturesPixel
+                               : SpirvShaderTranslator::kDescriptorSetTexturesVertex;
+    current_graphics_descriptor_sets_[set_index] = cache.set;
+    current_graphics_descriptor_set_values_up_to_date_ |= UINT32_C(1) << set_index;
+    return true;
+  };
+  auto fh2_remember_texture_set = [&](uint32_t stage, VkDescriptorSet set,
+                                      VkDescriptorSetLayout layout, size_t texture_offset,
+                                      uint32_t texture_count, size_t sampler_offset,
+                                      uint32_t sampler_count) {
+    Fh2TextureSetCache& cache = fh2_texture_set_cache_[stage];
+    cache.set = set;
+    cache.frame = frame_current_;
+    cache.layout = layout;
+    cache.texture_count = texture_count;
+    cache.infos.assign(descriptor_write_image_info_.begin() + texture_offset,
+                       descriptor_write_image_info_.begin() + texture_offset + texture_count);
+    cache.infos.insert(cache.infos.end(), descriptor_write_image_info_.begin() + sampler_offset,
+                       descriptor_write_image_info_.begin() + sampler_offset + sampler_count);
+  };
+  VkDescriptorSetLayout textures_vertex_layout =
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_vertex_ref();
+  VkDescriptorSetLayout textures_pixel_layout =
+      current_guest_graphics_pipeline_layout_->descriptor_set_layout_textures_pixel_ref();
+  bool fh2_texture_set_reuse = fh2::rtlog::TimedEnvInt("FH2_TEXTURE_SET_REUSE", 1) != 0;
+  if (fh2_texture_set_reuse && write_vertex_textures &&
+      fh2_reuse_texture_set(0, textures_vertex_layout, vertex_texture_image_info_offset,
+                            texture_count_vertex, vertex_sampler_image_info_offset,
+                            sampler_count_vertex)) {
+    write_vertex_textures = false;
+  }
+  if (fh2_texture_set_reuse && write_pixel_textures &&
+      fh2_reuse_texture_set(1, textures_pixel_layout, pixel_texture_image_info_offset,
+                            texture_count_pixel, pixel_sampler_image_info_offset,
+                            sampler_count_pixel)) {
+    write_pixel_textures = false;
+  }
+
   // Write the new descriptor sets.
 
   // Consecutive bindings updated via a single VkWriteDescriptorSet must have
@@ -7317,20 +7392,28 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       }
     }
     constants_transient_descriptors_used_.emplace_back(frame_current_, constants_descriptor_set);
-    // Consecutive bindings updated via a single VkWriteDescriptorSet must have
-    // identical stage flags, but for the constants they vary.
-    for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
-      VkWriteDescriptorSet& write_constants = write_descriptor_sets[write_descriptor_set_count++];
-      write_constants.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-      write_constants.pNext = nullptr;
-      write_constants.dstSet = constants_descriptor_set;
-      write_constants.dstBinding = i;
-      write_constants.dstArrayElement = 0;
-      write_constants.descriptorCount = 1;
-      write_constants.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-      write_constants.pImageInfo = nullptr;
-      write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
-      write_constants.pTexelBufferView = nullptr;
+    // FH2: written when the command stream is replayed (submission thread)
+    // rather than here -- the driver's descriptor writes for a new constants
+    // set every draw were ~7% of the draw thread. The set is fresh and only
+    // bound later in this stream.
+    if (fh2::rtlog::TimedEnvInt("FH2_DEFER_DESCRIPTOR_WRITES", 1)) {
+      deferred_command_buffer_.Fh2UpdateUniformBufferDescriptors(
+          constants_descriptor_set, SpirvShaderTranslator::kConstantBufferCount,
+          current_constant_buffer_infos_);
+    } else {
+      for (uint32_t i = 0; i < SpirvShaderTranslator::kConstantBufferCount; ++i) {
+        VkWriteDescriptorSet& write_constants = write_descriptor_sets[write_descriptor_set_count++];
+        write_constants.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_constants.pNext = nullptr;
+        write_constants.dstSet = constants_descriptor_set;
+        write_constants.dstBinding = i;
+        write_constants.dstArrayElement = 0;
+        write_constants.descriptorCount = 1;
+        write_constants.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write_constants.pImageInfo = nullptr;
+        write_constants.pBufferInfo = &current_constant_buffer_infos_[i];
+        write_constants.pTexelBufferView = nullptr;
+      }
     }
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetConstants;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
@@ -7352,6 +7435,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
         write_textures[0].dstSet;
+    fh2_remember_texture_set(0, write_textures[0].dstSet, textures_vertex_layout,
+                             vertex_texture_image_info_offset, texture_count_vertex,
+                             vertex_sampler_image_info_offset, sampler_count_vertex);
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
@@ -7369,6 +7455,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
     current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
         write_textures[0].dstSet;
+    fh2_remember_texture_set(1, write_textures[0].dstSet, textures_pixel_layout,
+                             pixel_texture_image_info_offset, texture_count_pixel,
+                             pixel_sampler_image_info_offset, sampler_count_pixel);
   }
   // Write.
   if (write_descriptor_set_count) {
@@ -7518,32 +7607,62 @@ inline bool Fh2IsSideEffectRegister(uint32_t index) {
 
 bool VulkanCommandProcessor::Fh2OnDrawSide() const { return false; }
 
+namespace {
+// Unflushed bytes after which the parser publishes anyway (so the draw thread
+// starts on long register / shader runs without waiting for the draw).
+constexpr uint64_t kFh2FlushBytes = 16 << 10;
+// The draw thread stores its tail at least this often within a batch.
+constexpr uint64_t kFh2TailStoreBytes = 64 << 10;
+}  // namespace
+
 uint8_t* VulkanCommandProcessor::Fh2Reserve(uint32_t size) {
   const uint64_t capacity = fh2_queue_.size();
-  uint64_t head = fh2_queue_head_.load(std::memory_order_relaxed);
-  uint64_t position = head % capacity;
-  uint32_t spins = 0;
+  uint64_t write = fh2_queue_write_;
+  uint64_t position = write % capacity;
+  // Only reads the draw thread's tail when the cached one says it's full.
+  auto wait_for_space = [&](uint64_t end) {
+    if (end - fh2_queue_cached_tail_ <= capacity) {
+      return;
+    }
+    // Whatever is waiting to be published must reach the draw thread first,
+    // or it can't free the space.
+    Fh2Flush();
+    uint32_t spins = 0;
+    while (end - (fh2_queue_cached_tail_ = fh2_queue_tail_.load(std::memory_order_acquire)) >
+           capacity) {
+      Fh2CpuRelax(spins);
+    }
+  };
   if (position + size > capacity) {
     // Fill the rest of the buffer with a wrap marker.
     uint32_t fill = uint32_t(capacity - position);
-    while (head + fill - fh2_queue_tail_.load(std::memory_order_acquire) > capacity) {
-      Fh2CpuRelax(spins);
-    }
+    wait_for_space(write + fill);
     auto* wrap = reinterpret_cast<Fh2OpHeader*>(&fh2_queue_[position]);
     wrap->type = Fh2OpType::kWrap;
     wrap->size = fill;
     Fh2Publish(fill);
-    head += fill;
+    write += fill;
     position = 0;
   }
-  while (head + size - fh2_queue_tail_.load(std::memory_order_acquire) > capacity) {
-    Fh2CpuRelax(spins);
-  }
+  wait_for_space(write + size);
   return &fh2_queue_[position];
 }
 
-void VulkanCommandProcessor::Fh2Publish(uint32_t size) {
-  fh2_queue_head_.fetch_add(size, std::memory_order_seq_cst);
+void VulkanCommandProcessor::Fh2Publish(uint32_t size, bool flush) {
+  fh2_queue_write_ += size;
+  if (flush ||
+      fh2_queue_write_ - fh2_queue_head_.load(std::memory_order_relaxed) >= kFh2FlushBytes) {
+    Fh2Flush();
+  }
+}
+
+void VulkanCommandProcessor::Fh2Flush() {
+  if (fh2_queue_head_.load(std::memory_order_relaxed) == fh2_queue_write_) {
+    return;
+  }
+  // seq_cst store + load: pairs with the draw thread's sleeping flag store and
+  // head reload, so a wakeup can't be missed.
+  fh2_queue_head_.store(fh2_queue_write_, std::memory_order_seq_cst);
   if (fh2_draw_sleeping_.load(std::memory_order_seq_cst)) {
     fh2_queue_head_.notify_one();
   }
@@ -7553,9 +7672,10 @@ void VulkanCommandProcessor::Fh2Drain() {
   if (!fh2_draw_thread_.joinable()) {
     return;
   }
-  uint64_t head = fh2_queue_head_.load(std::memory_order_relaxed);
+  Fh2Flush();
+  uint64_t head = fh2_queue_write_;
   uint32_t spins = 0;
-  while (fh2_queue_tail_.load(std::memory_order_acquire) != head) {
+  while ((fh2_queue_cached_tail_ = fh2_queue_tail_.load(std::memory_order_acquire)) != head) {
     Fh2CpuRelax(spins);
   }
 }
@@ -7588,6 +7708,10 @@ void VulkanCommandProcessor::Fh2DrawThreadMain() {
         continue;
       }
     }
+    // The tail is stored per batch (and every 64 KB within one), not per op:
+    // the parser reads it only when it runs out of space or drains.
+    uint64_t stored_tail = tail;
+    auto busy_start = std::chrono::steady_clock::now();
     while (tail != head) {
       const auto* op = reinterpret_cast<const Fh2OpHeader*>(&fh2_queue_[tail % capacity]);
       uint32_t size = op->size;
@@ -7595,8 +7719,16 @@ void VulkanCommandProcessor::Fh2DrawThreadMain() {
         Fh2ExecuteOp(op);
       }
       tail += size;
-      fh2_queue_tail_.store(tail, std::memory_order_release);
+      if (tail - stored_tail >= kFh2TailStoreBytes) {
+        fh2_queue_tail_.store(tail, std::memory_order_release);
+        stored_tail = tail;
+      }
     }
+    fh2_queue_tail_.store(tail, std::memory_order_release);
+    fh2::rtlog::g_counters.draw_thread_busy_ns += uint64_t(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             busy_start)
+            .count());
   }
 }
 
@@ -7808,7 +7940,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
   op->has_index_buffer = index_buffer_info != nullptr;
   op->major_mode_explicit = major_mode_explicit;
   op->index_buffer_info = index_buffer_info ? *index_buffer_info : IndexBufferInfo();
-  Fh2Publish(size);
+  Fh2Publish(size, true);
   return true;
 }
 
@@ -7839,7 +7971,7 @@ void VulkanCommandProcessor::WriteFenceMemory32(uint32_t address, uint32_t guest
   auto* words = reinterpret_cast<uint32_t*>(op + 1);
   words[0] = address;
   words[1] = guest_value;
-  Fh2Publish(16);
+  Fh2Publish(16, true);
 }
 
 void VulkanCommandProcessor::OnPrimaryBufferEnd() {
@@ -7851,7 +7983,7 @@ void VulkanCommandProcessor::OnPrimaryBufferEnd() {
   auto* op = reinterpret_cast<Fh2OpHeader*>(Fh2Reserve(8));
   op->type = Fh2OpType::kPrimaryBufferEnd;
   op->size = 8;
-  Fh2Publish(8);
+  Fh2Publish(8, true);
 }
 
 }  // namespace rex::graphics::fh2vk

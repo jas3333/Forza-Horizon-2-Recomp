@@ -994,11 +994,62 @@ struct RenderDocAutoCapture {
 } g_renderdoc_auto_capture;
 }  // namespace
 
+// CRT pow(double, double) (f1, f2 -> f1). The recompiled software version
+// was over a third of the main thread while loading (the loading screen
+// froze for up to a second at a time). FH2_HOST_POW: 1 (default) host
+// std::pow, 0 the guest's, 2 validate -- run both, keep the guest result and
+// log how far the host one is ([POW] lines).
+extern "C" void __imp__sub_82448CA8(PPCContext& ctx, uint8_t* base);
+extern "C" REX_FUNC(sub_82448CA8) {
+  static const int mode = [] {
+    const char* env = std::getenv("FH2_HOST_POW");
+    return env ? std::atoi(env) : 1;
+  }();
+  if (mode == 1) {
+    ctx.f1.f64 = std::pow(ctx.f1.f64, ctx.f2.f64);
+    return;
+  }
+  if (mode != 2) {
+    __imp__sub_82448CA8(ctx, base);
+    return;
+  }
+  double x = ctx.f1.f64, y = ctx.f2.f64;
+  __imp__sub_82448CA8(ctx, base);
+  double guest = ctx.f1.f64, host = std::pow(x, y);
+  static std::atomic<uint64_t> calls{0}, differing{0}, max_ulps{0};
+  uint64_t n = ++calls;
+  uint64_t gb, hb;
+  std::memcpy(&gb, &guest, 8);
+  std::memcpy(&hb, &host, 8);
+  if (gb != hb && !(std::isnan(guest) && std::isnan(host))) {
+    uint64_t ulps = gb > hb ? gb - hb : hb - gb;
+    uint64_t d = ++differing;
+    uint64_t m = max_ulps.load();
+    while (ulps > m && !max_ulps.compare_exchange_weak(m, ulps)) {
+    }
+    if (d <= 20 || ulps > 4) {
+      REXLOG_INFO("[POW] pow({:.17g}, {:.17g}): guest {:.17g} host {:.17g} ({} ulps)", x, y,
+                  guest, host, ulps);
+    }
+  }
+  if ((n & 0x3FFFF) == 0) {
+    REXLOG_INFO("[POW] {} calls, {} differ, max {} ulps", n, differing.load(), max_ulps.load());
+  }
+}
+
 // Profiling: the D3D ring-buffer space wait (spins on the CP read pointer).
 // Shows up as "guest:ring_space_wait" in Tracy captures.
 #include <rex/dbg.h>
 extern "C" void __imp__sub_82B72A90(PPCContext& ctx, uint8_t* base);
 extern "C" REX_FUNC(sub_82B72A90) {
+  // One poll of the wait lowers the hardware thread's priority (cctpl) and
+  // spins 4 x 8 db16cyc delays before checking. Those are no-ops once
+  // recompiled, which made the wait a tight loop pegging a host core and the
+  // SMT sibling the renderer threads may share. The pauses give back roughly
+  // the original ~512-cycle delay.
+  for (int i = 0; i < 8; ++i) {
+    __builtin_ia32_pause();
+  }
 #ifdef REXGLUE_ENABLE_PROFILING
   // The game calls this in a tight loop (~500k/s), far too often for a zone
   // per call. Accumulate the time and plot the share of each 100 ms spent
